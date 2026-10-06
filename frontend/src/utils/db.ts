@@ -1,7 +1,10 @@
 /**
  * IndexedDB 持久化层（Dexie 封装）
- * - 数据结构版本号与升级迁移逻辑（v1 → v2：Coat 增加 paintType 索引并回填历史记录）
- * - 六张业务表的增删改查与整库导入导出
+ * - 数据结构版本号与升级迁移逻辑
+ *   v1 → v2：Coat 增加 paintType 索引并回填历史记录
+ *   v2 → v3：新增 orders 委托单表；Body 增加 orderId/orderNo/basedOnVersion/suspended/returned，
+ *            升级时为旧胎体补字段并按委托人回填委托单号（填不出单列待人工回填）
+ * - 七张业务表的增删改查与整库导入导出
  * - 首次打开自动播种互相引用的演示数据（幂等）
  * 纯前端应用：不依赖任何后端服务或数据库。
  */
@@ -12,12 +15,13 @@ import type { Room } from '@/types/room';
 import type { Polish } from '@/types/polish';
 import type { Inlay } from '@/types/inlay';
 import type { Inspect } from '@/types/inspect';
+import type { Order } from '@/types/order';
 
 /** 数据库名（README 与导出文件均使用该名称） */
 export const DB_NAME = 'gblacquer';
 
 /** 当前数据结构版本号 */
-export const DB_SCHEMA_VERSION = 2;
+export const DB_SCHEMA_VERSION = 3;
 
 /** localStorage 侧少量元数据键 */
 export const LS_KEYS = {
@@ -84,6 +88,7 @@ class LacquerDatabase extends Dexie {
   polishes!: Table<Polish, string>;
   inlays!: Table<Inlay, string>;
   inspects!: Table<Inspect, string>;
+  orders!: Table<Order, string>;
 
   constructor() {
     super(DB_NAME);
@@ -99,7 +104,7 @@ class LacquerDatabase extends Dexie {
     });
 
     // v2：Coat 增加 paintType 索引；历史记录缺少 paintType 时按「生漆」回填
-    this.version(DB_SCHEMA_VERSION)
+    this.version(2)
       .stores({
         bodies: 'id, code, material, shape, state, updatedAt',
         coats: 'id, bodyId, seq, paintType, state, needRecheck, updatedAt',
@@ -119,13 +124,58 @@ class LacquerDatabase extends Dexie {
             if (typeof coat.thicknessUm !== 'number') coat.thicknessUm = 40;
           });
       });
+
+    // v3：新增 orders 委托单表；Body 增加 orderId/orderNo/basedOnVersion/suspended/returned
+    this.version(3)
+      .stores({
+        bodies: 'id, code, material, shape, state, orderNo, orderId, suspended, returned, updatedAt',
+        coats: 'id, bodyId, seq, paintType, state, needRecheck, updatedAt',
+        rooms: 'id, bodyId, date, verdict, updatedAt',
+        polishes: 'id, bodyId, seq, method, updatedAt',
+        inlays: 'id, bodyId, type, position, updatedAt',
+        inspects: 'id, bodyId, verdict, date, updatedAt',
+        orders: 'id, orderNo, ownerName, status, dueDate, updatedAt',
+      })
+      .upgrade(async (tx) => {
+        // 旧胎体补委托对账字段
+        await tx
+          .table<Body>('bodies')
+          .toCollection()
+          .modify((body) => {
+            if (body.orderId !== null && typeof body.orderId !== 'string') body.orderId = null;
+            if (typeof body.orderNo !== 'string') body.orderNo = '';
+            if (typeof body.basedOnVersion !== 'number') body.basedOnVersion = 1;
+            if (typeof body.suspended !== 'boolean') body.suspended = false;
+            if (typeof body.suspendedReason !== 'string') body.suspendedReason = '';
+            if (typeof body.returned !== 'boolean') body.returned = false;
+          });
+
+        // 升级时按委托人回填委托单号：v3 首次升级 orders 多为空表，
+        // 填不出的胎体保持 orderNo 为空，列入「待回填」单列，由人工补单后再回填。
+        const orders = await tx.table<Order>('orders').toArray();
+        await tx
+          .table<Body>('bodies')
+          .toCollection()
+          .modify((body) => {
+            if (body.orderNo) return;
+            const matched = orders.filter(
+              (order) => order.ownerName === body.ownerName && order.status !== 'cancelled',
+            );
+            if (matched.length === 1) {
+              const order = matched[0] as Order;
+              body.orderId = order.id;
+              body.orderNo = order.orderNo;
+              body.basedOnVersion = order.version;
+            }
+          });
+      });
   }
 }
 
 export const db = new LacquerDatabase();
 
-/** 六张业务表清单，事务中统一引用 */
-const TABLE_LIST = [db.bodies, db.coats, db.rooms, db.polishes, db.inlays, db.inspects];
+/** 七张业务表清单，事务中统一引用 */
+const TABLE_LIST = [db.bodies, db.coats, db.rooms, db.polishes, db.inlays, db.inspects, db.orders];
 
 /** 生成主键：短前缀 + 时间戳 + 随机串，避免多标签页写入冲突 */
 export function createId(prefix: string): string {
@@ -156,6 +206,12 @@ export async function seedDatabase(): Promise<void> {
       sizeMm: 152,
       ownerName: '陈氏委托',
       state: 'coating',
+      orderId: 'order_01',
+      orderNo: 'WT-2401',
+      basedOnVersion: 1,
+      suspended: false,
+      suspendedReason: '',
+      returned: false,
       createdAt: now - 86400000 * 12,
       updatedAt: now - 86400000 * 2,
     },
@@ -167,6 +223,12 @@ export async function seedDatabase(): Promise<void> {
       sizeMm: 96,
       ownerName: '工作室自藏',
       state: 'drying',
+      orderId: 'order_02',
+      orderNo: 'WT-2402',
+      basedOnVersion: 1,
+      suspended: false,
+      suspendedReason: '',
+      returned: false,
       createdAt: now - 86400000 * 9,
       updatedAt: now - 86400000,
     },
@@ -178,8 +240,48 @@ export async function seedDatabase(): Promise<void> {
       sizeMm: 210,
       ownerName: '市工艺美术馆',
       state: 'done',
+      orderId: 'order_03',
+      orderNo: 'WT-2403',
+      basedOnVersion: 1,
+      suspended: false,
+      suspendedReason: '',
+      returned: false,
       createdAt: now - 86400000 * 30,
       updatedAt: now - 86400000 * 4,
+    },
+    {
+      id: 'body_04',
+      code: 'LQ-2404',
+      material: 'wood',
+      shape: 'bowl',
+      sizeMm: 140,
+      ownerName: '安氏定制',
+      state: 'coating',
+      orderId: 'order_04',
+      orderNo: 'WT-2404',
+      basedOnVersion: 1,
+      suspended: false,
+      suspendedReason: '',
+      returned: false,
+      createdAt: now - 86400000 * 6,
+      updatedAt: now - 86400000 * 1,
+    },
+    {
+      id: 'body_05',
+      code: 'LQ-2405',
+      material: 'wood',
+      shape: 'plate',
+      sizeMm: 110,
+      ownerName: '未登记散客',
+      state: 'pending',
+      orderId: null,
+      orderNo: '',
+      basedOnVersion: 1,
+      suspended: false,
+      suspendedReason: '',
+      returned: false,
+      createdAt: now - 86400000 * 3,
+      updatedAt: now - 86400000 * 3,
     },
   ];
 
@@ -192,6 +294,8 @@ export async function seedDatabase(): Promise<void> {
     { id: 'coat_0301', bodyId: 'body_03', seq: 1, paintType: 'raw', colorName: '漆黑', coatDate: '2026-02-10', thicknessUm: 38, state: 'done', needRecheck: false, createdAt: now - 86400000 * 26, updatedAt: now - 86400000 * 25 },
     { id: 'coat_0302', bodyId: 'body_03', seq: 2, paintType: 'color', colorName: '石绿', coatDate: '2026-02-18', thicknessUm: 44, state: 'done', needRecheck: false, createdAt: now - 86400000 * 20, updatedAt: now - 86400000 * 18 },
     { id: 'coat_0303', bodyId: 'body_03', seq: 3, paintType: 'topcoat', colorName: '描金', coatDate: '2026-02-26', thicknessUm: 28, state: 'done', needRecheck: false, createdAt: now - 86400000 * 14, updatedAt: now - 86400000 * 4 },
+    { id: 'coat_0401', bodyId: 'body_04', seq: 1, paintType: 'raw', colorName: '漆黑', coatDate: '2026-03-05', thicknessUm: 36, state: 'done', needRecheck: false, createdAt: now - 86400000 * 5, updatedAt: now - 86400000 * 4 },
+    { id: 'coat_0402', bodyId: 'body_04', seq: 2, paintType: 'color', colorName: '朱红', coatDate: '2026-03-11', thicknessUm: 40, state: 'coated', needRecheck: false, createdAt: now - 86400000 * 2, updatedAt: now - 86400000 },
   ];
 
   const rooms: Room[] = [
@@ -220,6 +324,72 @@ export async function seedDatabase(): Promise<void> {
     { id: 'inspect_0102', bodyId: 'body_02', verdict: 'rework', defectNote: '起皱（荫干过快）', inspector: '周衡', date: '2026-03-08', defectCoatSeq: 2, defectRoomId: 'room_0201', createdAt: now - 86400000, updatedAt: now - 86400000 },
   ];
 
+  const orders: Order[] = [
+    {
+      id: 'order_01',
+      orderNo: 'WT-2401',
+      ownerName: '陈氏委托',
+      shape: 'bowl',
+      sizeMm: 152,
+      dueDate: '2026-04-15',
+      status: 'active',
+      version: 1,
+      versions: [{ version: 1, shape: 'bowl', sizeMm: 152, changedAt: now - 86400000 * 12, changeNote: '建单' }],
+      cancelledAt: null,
+      note: '委托人要求随葬级髹涂，交期前完工',
+      createdAt: now - 86400000 * 12,
+      updatedAt: now - 86400000 * 12,
+    },
+    {
+      id: 'order_02',
+      orderNo: 'WT-2402',
+      ownerName: '工作室自藏',
+      shape: 'box',
+      sizeMm: 96,
+      dueDate: '2026-05-01',
+      status: 'active',
+      version: 1,
+      versions: [{ version: 1, shape: 'box', sizeMm: 96, changedAt: now - 86400000 * 9, changeNote: '建单' }],
+      cancelledAt: null,
+      note: '',
+      createdAt: now - 86400000 * 9,
+      updatedAt: now - 86400000 * 9,
+    },
+    {
+      id: 'order_03',
+      orderNo: 'WT-2403',
+      ownerName: '市工艺美术馆',
+      shape: 'vase',
+      sizeMm: 210,
+      dueDate: '2026-03-10',
+      status: 'done',
+      version: 1,
+      versions: [{ version: 1, shape: 'vase', sizeMm: 210, changedAt: now - 86400000 * 30, changeNote: '建单' }],
+      cancelledAt: null,
+      note: '馆藏陈列，已完成交付',
+      createdAt: now - 86400000 * 30,
+      updatedAt: now - 86400000 * 4,
+    },
+    {
+      id: 'order_04',
+      orderNo: 'WT-2404',
+      ownerName: '安氏定制',
+      shape: 'bowl',
+      sizeMm: 140,
+      dueDate: '2026-04-20',
+      status: 'active',
+      version: 2,
+      versions: [
+        { version: 1, shape: 'plate', sizeMm: 120, changedAt: now - 86400000 * 6, changeNote: '建单' },
+        { version: 2, shape: 'bowl', sizeMm: 140, changedAt: now - 86400000 * 1, changeNote: '委托人改器型为碗，尺寸加大至 140mm' },
+      ],
+      cancelledAt: null,
+      note: '中途改规格，已开工件按 v1 旧版照旧做完',
+      createdAt: now - 86400000 * 6,
+      updatedAt: now - 86400000 * 1,
+    },
+  ];
+
   await db.transaction('rw', TABLE_LIST, async () => {
     await db.bodies.bulkPut(bodies);
     await db.coats.bulkPut(coats);
@@ -227,6 +397,7 @@ export async function seedDatabase(): Promise<void> {
     await db.polishes.bulkPut(polishes);
     await db.inlays.bulkPut(inlays);
     await db.inspects.bulkPut(inspects);
+    await db.orders.bulkPut(orders);
   });
 }
 
@@ -242,16 +413,18 @@ export interface LacquerSnapshot {
   polishes: Polish[];
   inlays: Inlay[];
   inspects: Inspect[];
+  orders: Order[];
 }
 
 export async function exportSnapshot(): Promise<LacquerSnapshot> {
-  const [bodies, coats, rooms, polishes, inlays, inspects] = await Promise.all([
+  const [bodies, coats, rooms, polishes, inlays, inspects, orders] = await Promise.all([
     db.bodies.toArray(),
     db.coats.toArray(),
     db.rooms.toArray(),
     db.polishes.toArray(),
     db.inlays.toArray(),
     db.inspects.toArray(),
+    db.orders.toArray(),
   ]);
   return {
     app: DB_NAME,
@@ -263,6 +436,7 @@ export async function exportSnapshot(): Promise<LacquerSnapshot> {
     polishes,
     inlays,
     inspects,
+    orders,
   };
 }
 
@@ -271,7 +445,15 @@ export function validateSnapshot(input: unknown): string {
   if (typeof input !== 'object' || input === null) return '文件内容不是合法的 JSON 对象';
   const snapshot = input as Partial<LacquerSnapshot>;
   if (snapshot.app !== DB_NAME) return `备份文件不属于本项目（app=${String(snapshot.app)}）`;
-  const keys: Array<keyof LacquerSnapshot> = ['bodies', 'coats', 'rooms', 'polishes', 'inlays', 'inspects'];
+  const keys: Array<keyof LacquerSnapshot> = [
+    'bodies',
+    'coats',
+    'rooms',
+    'polishes',
+    'inlays',
+    'inspects',
+    'orders',
+  ];
   for (const key of keys) {
     if (!Array.isArray(snapshot[key])) return `备份文件缺少 ${String(key)} 集合`;
   }
@@ -287,6 +469,7 @@ export async function importSnapshot(snapshot: LacquerSnapshot): Promise<void> {
     await db.polishes.bulkPut(snapshot.polishes);
     await db.inlays.bulkPut(snapshot.inlays);
     await db.inspects.bulkPut(snapshot.inspects);
+    await db.orders.bulkPut(snapshot.orders);
   });
 }
 
@@ -299,6 +482,7 @@ export async function clearAllTables(): Promise<void> {
       db.polishes.clear(),
       db.inlays.clear(),
       db.inspects.clear(),
+      db.orders.clear(),
     ]);
   });
 }
@@ -310,15 +494,16 @@ export async function resetDatabase(): Promise<void> {
 }
 
 export async function countAll(): Promise<Record<string, number>> {
-  const [bodies, coats, rooms, polishes, inlays, inspects] = await Promise.all([
+  const [bodies, coats, rooms, polishes, inlays, inspects, orders] = await Promise.all([
     db.bodies.count(),
     db.coats.count(),
     db.rooms.count(),
     db.polishes.count(),
     db.inlays.count(),
     db.inspects.count(),
+    db.orders.count(),
   ]);
-  return { bodies, coats, rooms, polishes, inlays, inspects };
+  return { bodies, coats, rooms, polishes, inlays, inspects, orders };
 }
 
 /* ------------------------------ 级联删除 ------------------------------ */

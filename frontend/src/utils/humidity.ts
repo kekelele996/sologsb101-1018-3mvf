@@ -64,6 +64,16 @@ export function suggestIntervalHours(paintType: PaintType): number {
   return 12;
 }
 
+/**
+ * 湿膜厚度建议（μm）：按器型与尺寸给出参考厚度。
+ * 大件厚胎厚涂、小件薄涂；委托人中途改尺寸器型后据此作废重算。
+ */
+export function suggestThicknessUm(shape: BodyShape, sizeMm: number): number {
+  const base: Record<BodyShape, number> = { vase: 46, box: 42, bowl: 38, plate: 34 };
+  const sizeFactor = sizeMm >= 200 ? 1.15 : sizeMm <= 100 ? 0.9 : 1;
+  return Math.round(base[shape] * sizeFactor);
+}
+
 /** 按器型与上一道漆种给出建议漆种：小件多罩漆，大件多生漆打底 */
 export function suggestPaintType(seq: number, previous?: PaintType, shape?: BodyShape): PaintType {
   if (seq <= 1) return 'raw';

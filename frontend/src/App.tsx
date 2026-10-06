@@ -11,6 +11,7 @@ import {
   CloudOutlined,
   DashboardOutlined,
   ExportOutlined,
+  FileTextOutlined,
   FormatPainterOutlined,
   HighlightOutlined,
 } from '@ant-design/icons';
@@ -18,6 +19,7 @@ import { ROUTES } from './router';
 import { useBodyStore } from './stores/bodyStore';
 import { useCoatStore } from './stores/coatStore';
 import { useRoomStore } from './stores/roomStore';
+import { useOrderStore } from './stores/orderStore';
 import { initDatabase } from './utils/db';
 import { BODY_MATERIAL_LABEL, BODY_SHAPE_LABEL, BODY_STATE_LABEL } from './types/body';
 
@@ -35,6 +37,9 @@ export default function App() {
   const loadCoats = useCoatStore((state) => state.loadCoats);
   const rooms = useRoomStore((state) => state.rooms);
   const loadRooms = useRoomStore((state) => state.loadRooms);
+  const orders = useOrderStore((state) => state.orders);
+  const loadOrders = useOrderStore((state) => state.loadOrders);
+  const runReconcile = useOrderStore((state) => state.runReconcile);
 
   useEffect(() => {
     let cancelled = false;
@@ -42,7 +47,10 @@ export default function App() {
       try {
         await initDatabase();
         if (cancelled) return;
-        await Promise.all([loadBodies(), loadCoats(), loadRooms()]);
+        await Promise.all([loadBodies(), loadCoats(), loadRooms(), loadOrders()]);
+        if (cancelled) return;
+        // 载入后按编号自动对账：对不上号的胎体挂起等人判
+        await runReconcile();
       } catch (error) {
         if (cancelled) return;
         message.error(`本地数据库初始化失败：${error instanceof Error ? error.message : '未知错误'}`);
@@ -51,20 +59,23 @@ export default function App() {
     return () => {
       cancelled = true;
     };
-  }, [loadBodies, loadCoats, loadRooms, message]);
+  }, [loadBodies, loadCoats, loadRooms, loadOrders, runReconcile, message]);
 
+  const suspendedCount = bodies.filter((body) => body.suspended).length;
   const currentBody = bodies.find((body) => body.id === currentBodyId) ?? null;
-  const selectedKey = location.pathname.startsWith('/coats')
-    ? ROUTES.coats
-    : location.pathname.startsWith('/rooms')
-      ? ROUTES.rooms
-      : location.pathname.startsWith('/polish')
-        ? ROUTES.polish
-        : location.pathname.startsWith('/inlays')
-          ? ROUTES.inlays
-          : location.pathname.startsWith('/export')
-            ? ROUTES.export
-            : ROUTES.bodies;
+  const selectedKey = location.pathname.startsWith('/orders')
+    ? ROUTES.orders
+    : location.pathname.startsWith('/coats')
+      ? ROUTES.coats
+      : location.pathname.startsWith('/rooms')
+        ? ROUTES.rooms
+        : location.pathname.startsWith('/polish')
+          ? ROUTES.polish
+          : location.pathname.startsWith('/inlays')
+            ? ROUTES.inlays
+            : location.pathname.startsWith('/export')
+              ? ROUTES.export
+              : ROUTES.bodies;
 
   return (
     <Layout style={{ minHeight: '100vh', background: 'transparent' }}>
@@ -85,6 +96,7 @@ export default function App() {
           onClick={({ key }) => navigate(key)}
           items={[
             { key: ROUTES.bodies, icon: <AppstoreOutlined />, label: '胎体与器型' },
+            { key: ROUTES.orders, icon: <FileTextOutlined />, label: '委托单与对账' },
             { key: ROUTES.coats, icon: <FormatPainterOutlined />, label: '髹涂道次' },
             { key: ROUTES.rooms, icon: <CloudOutlined />, label: '荫房记录' },
             { key: ROUTES.polish, icon: <BgColorsOutlined />, label: '打磨推光' },
@@ -97,6 +109,7 @@ export default function App() {
             <span>
               <DashboardOutlined /> 胎体 {bodies.length} 件
             </span>
+            <span>委托单 {orders.length} 张</span>
             <span>髹涂道次 {coats.length} 道</span>
             <span>荫房记录 {rooms.length} 条</span>
           </Space>
@@ -128,9 +141,10 @@ export default function App() {
             )}
           </Space>
           <Space>
-            <Button size="small" onClick={() => navigate(ROUTES.coats)}>
-              进入道次编排
+            <Button size="small" onClick={() => navigate(ROUTES.orders)}>
+              委托单与对账
             </Button>
+            <Badge count={suspendedCount} color="#b03a2e" title="对账挂起胎体" />
             <Badge count={coats.filter((coat) => coat.needRecheck).length} color="#c9963c" title="待复检道次" />
           </Space>
         </Header>

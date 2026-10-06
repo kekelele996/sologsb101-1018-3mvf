@@ -114,7 +114,7 @@ export function selectFilteredBodies(bodies: Body[], filters: BodyFilters): Body
   const keyword = filters.keyword.trim();
   return bodies.filter((body) => {
     if (keyword.length > 0) {
-      const haystack = `${body.code}${body.ownerName}${body.sizeMm}`;
+      const haystack = `${body.code}${body.ownerName}${body.orderNo}${body.sizeMm}`;
       if (!haystack.includes(keyword)) return false;
     }
     if (filters.materials.length > 0 && !filters.materials.includes(body.material)) return false;

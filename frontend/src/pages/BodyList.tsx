@@ -32,6 +32,7 @@ import { useIdbTable } from '@/hooks/useIdbTable';
 import { ROUTES } from '@/router';
 import { DEFAULT_BODY_FILTERS, selectFilteredBodies, useBodyStore } from '@/stores/bodyStore';
 import { useCoatStore } from '@/stores/coatStore';
+import { useOrderStore } from '@/stores/orderStore';
 import type { Inlay } from '@/types/inlay';
 import {
   BODY_MATERIAL_LABEL,
@@ -45,6 +46,7 @@ import {
   type BodyMaterial,
   type BodyShape,
 } from '@/types/body';
+import { ORDER_STATUS_LABEL } from '@/types/order';
 
 /** 模块级常量：保证 useFilterQuery 的 keys 引用稳定 */
 const FILTER_KEYS = ['material', 'shape'] as const;
@@ -74,6 +76,7 @@ export default function BodyList() {
   const inlayTable = useIdbTable<Inlay>((database) => database.inlays, { sortByUpdatedAt: false });
   const { progressOf, currentCoatText, totals } = useCoatProgress();
   const coats = useCoatStore((state) => state.coats);
+  const orders = useOrderStore((state) => state.orders);
 
   const url = useFilterQuery(FILTER_KEYS);
   const [editing, setEditing] = useState<Body | null>(null);
@@ -103,17 +106,26 @@ export default function BodyList() {
       sizeMm: body.sizeMm,
       ownerName: body.ownerName,
       state: body.state,
+      orderId: body.orderId,
     });
     setOpen(true);
   };
 
   const submit = async (): Promise<void> => {
     const values = await form.validateFields();
+    // 关联委托单时带出委托单号与依据版本
+    const order = values.orderId ? orders.find((item) => item.id === values.orderId) : undefined;
+    const payload: BodyDraft = {
+      ...values,
+      orderId: order ? order.id : null,
+      orderNo: order ? order.orderNo : '',
+      basedOnVersion: order ? order.version : 1,
+    };
     if (editing) {
-      await updateBody(editing.id, values);
-      message.success(`已更新胎体 ${values.code}`);
+      await updateBody(editing.id, payload);
+      message.success(`已更新胎体 ${payload.code}`);
     } else {
-      const created = await createBody(values);
+      const created = await createBody(payload);
       message.success(`已新建胎体 ${created.code}，可进入道次编排`);
     }
     setOpen(false);
@@ -214,6 +226,23 @@ export default function BodyList() {
                         <Tag color="gold">{body.sizeMm} mm</Tag>
                       </Space>
                       <Typography.Text type="secondary">委托 / 藏家：{body.ownerName || '未填写'}</Typography.Text>
+                      <Space size={4} wrap>
+                        {body.orderNo ? (
+                          <Tag color="blue">{body.orderNo}</Tag>
+                        ) : (
+                          <Tag>未关联委托单</Tag>
+                        )}
+                        {body.suspended ? <Tag color="error">对账挂起</Tag> : null}
+                        {body.returned ? <Tag>已退回</Tag> : null}
+                        {body.orderId &&
+                        orders.find((order) => order.id === body.orderId)?.status === 'cancelled' ? (
+                          <Tag>委托已撤</Tag>
+                        ) : null}
+                        {body.orderId &&
+                        orders.find((order) => order.id === body.orderId)?.status === 'done' ? (
+                          <Tag color="success">委托已完成</Tag>
+                        ) : null}
+                      </Space>
                       <Typography.Text>
                         道次完成 <strong>{stat.coatDone}</strong> / {stat.coatTotal}（{stat.coatPercent}%）
                         {stat.currentSeq > 0 ? ` · 当前第 ${stat.currentSeq} 道` : ' · 全部完成'}
@@ -284,6 +313,20 @@ export default function BodyList() {
           </Space>
           <Form.Item name="ownerName" label="委托 / 藏家">
             <Input placeholder="如：市工艺美术馆" />
+          </Form.Item>
+          <Form.Item name="orderId" label="关联委托单">
+            <Select
+              allowClear
+              showSearch
+              placeholder="选择接单前台的委托单（可在委托单与对账页新建）"
+              optionFilterProp="label"
+              options={orders
+                .filter((order) => order.status !== 'cancelled')
+                .map((order) => ({
+                  value: order.id,
+                  label: `${order.orderNo} · ${order.ownerName} · ${BODY_SHAPE_LABEL[order.shape]} · ${order.sizeMm}mm（${ORDER_STATUS_LABEL[order.status]}）`,
+                }))}
+            />
           </Form.Item>
         </Form>
       </Modal>

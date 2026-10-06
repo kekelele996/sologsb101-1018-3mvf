@@ -27,6 +27,18 @@ export interface Body {
   ownerName: string;
   /** 当前状态 */
   state: BodyState;
+  /** 关联委托单 id（接单前台），未关联为 null */
+  orderId: string | null;
+  /** 委托单号（对账依据，冗余便于按编号对账） */
+  orderNo: string;
+  /** 依据委托单版本号（委托人改规格后据此区分旧版照旧做完 / 新版重排） */
+  basedOnVersion: number;
+  /** 对账不匹配挂起标记（对不上号先挂起等人判） */
+  suspended: boolean;
+  /** 挂起原因 */
+  suspendedReason: string;
+  /** 委托撤单后未开工退回标记 */
+  returned: boolean;
   createdAt: number;
   updatedAt: number;
 }
@@ -94,6 +106,12 @@ export function createEmptyBodyDraft(): BodyDraft {
     sizeMm: 120,
     ownerName: '',
     state: 'pending',
+    orderId: null,
+    orderNo: '',
+    basedOnVersion: 1,
+    suspended: false,
+    suspendedReason: '',
+    returned: false,
   };
 }
 

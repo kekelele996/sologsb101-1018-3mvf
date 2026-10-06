@@ -9,6 +9,7 @@ import { Skeleton } from 'antd';
 import App from '../App';
 
 const BodyList = lazy(() => import('../pages/BodyList'));
+const OrderBoard = lazy(() => import('../pages/OrderBoard'));
 const CoatBoard = lazy(() => import('../pages/CoatBoard'));
 const RoomLog = lazy(() => import('../pages/RoomLog'));
 const PolishBoard = lazy(() => import('../pages/PolishBoard'));
@@ -18,6 +19,7 @@ const ExportView = lazy(() => import('../pages/ExportView'));
 /** ROUTES 常量：页面与导航统一引用，避免散落硬编码 */
 export const ROUTES = {
   bodies: '/bodies',
+  orders: '/orders',
   coats: '/coats',
   rooms: '/rooms',
   polish: '/polish',
@@ -47,6 +49,7 @@ export const appRoutes: RouteObject[] = [
     children: [
       { index: true, element: <Navigate to={ROUTES.bodies} replace /> },
       { path: 'bodies', element: withSuspense(<BodyList />) },
+      { path: 'orders', element: withSuspense(<OrderBoard />) },
       { path: 'coats', element: withSuspense(<CoatBoard />) },
       { path: 'rooms', element: withSuspense(<RoomLog />) },
       { path: 'polish', element: withSuspense(<PolishBoard />) },

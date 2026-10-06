@@ -196,6 +196,10 @@ body::before {
   border-top: 2px dashed var(--gb-red);
 }
 
+.gb-row-suspended {
+  background: rgba(176, 58, 46, 0.06);
+}
+
 /* 器型示意区：镶嵌纹饰叠加显示 */
 .gb-vessel {
   position: relative;

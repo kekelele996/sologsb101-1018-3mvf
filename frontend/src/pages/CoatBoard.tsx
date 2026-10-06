@@ -36,6 +36,7 @@ import StageTag from '@/components/common/StageTag';
 import { useCoatProgress } from '@/hooks/useCoatProgress';
 import { useBodyStore } from '@/stores/bodyStore';
 import { useCoatStore } from '@/stores/coatStore';
+import { useOrderStore } from '@/stores/orderStore';
 import {
   COAT_STATE_LABEL,
   COAT_STATE_OPTIONS,
@@ -49,7 +50,9 @@ import {
   type PaintType,
 } from '@/types/coat';
 import { BODY_SHAPE_LABEL } from '@/types/body';
-import { suggestIntervalHours } from '@/utils/humidity';
+import { orderSpecAt } from '@/types/order';
+import { isOldVersion } from '@/utils/reconcile';
+import { suggestIntervalHours, suggestThicknessUm } from '@/utils/humidity';
 
 const FILTER_KEYS = ['paintType', 'state'] as const;
 
@@ -74,6 +77,7 @@ export default function CoatBoard() {
   const reorderCoats = useCoatStore((state) => state.reorderCoats);
   const nextSeq = useCoatStore((state) => state.nextSeq);
   const suggestForBody = useCoatStore((state) => state.suggestForBody);
+  const orders = useOrderStore((state) => state.orders);
 
   const { progressOf, currentCoatText, totals } = useCoatProgress();
   const url = useFilterQuery(FILTER_KEYS);
@@ -88,6 +92,18 @@ export default function CoatBoard() {
 
   const activeBody = bodies.find((body) => body.id === currentBodyId) ?? bodies[0] ?? null;
   const bodyId = activeBody?.id ?? '';
+
+  const activeOrder = activeBody?.orderId
+    ? (orders.find((order) => order.id === activeBody.orderId) ?? null)
+    : null;
+  const oldVersion = activeBody ? isOldVersion(activeBody, activeOrder) : false;
+  const effectiveSpec =
+    activeBody && activeOrder
+      ? orderSpecAt(activeOrder, activeBody.basedOnVersion)
+      : activeBody
+        ? { shape: activeBody.shape, sizeMm: activeBody.sizeMm }
+        : null;
+  const suggestedThickness = effectiveSpec ? suggestThicknessUm(effectiveSpec.shape, effectiveSpec.sizeMm) : 40;
 
   useEffect(() => {
     if (!currentBodyId && bodies.length > 0) setCurrentBodyId(bodies[0]!.id);
@@ -310,6 +326,42 @@ export default function CoatBoard() {
         />
       ) : null}
 
+      {activeBody ? (
+        oldVersion && activeOrder ? (
+          <Alert
+            type="warning"
+            showIcon
+            style={{ marginBottom: 14 }}
+            message={`该件已开工，按委托单 ${activeOrder.orderNo} v${activeBody.basedOnVersion} 旧版照旧做完`}
+            description={`委托单已更新至 v${activeOrder.version}（${BODY_SHAPE_LABEL[activeOrder.shape]} · ${activeOrder.sizeMm}mm）；已髹涂道次不追溯，未涂道次仍按旧版施工，湿膜厚度建议 ${suggestedThickness}μm。`}
+          />
+        ) : activeOrder ? (
+          <Alert
+            type="success"
+            showIcon
+            style={{ marginBottom: 14 }}
+            message={`按委托单 ${activeOrder.orderNo} v${activeOrder.version} 最新版施工`}
+            description={`${BODY_SHAPE_LABEL[effectiveSpec?.shape ?? activeOrder.shape]} · ${effectiveSpec?.sizeMm ?? activeOrder.sizeMm}mm；湿膜厚度建议 ${suggestedThickness}μm，荫干时长据此重算。`}
+          />
+        ) : activeBody.suspended ? (
+          <Alert
+            type="error"
+            showIcon
+            style={{ marginBottom: 14 }}
+            message={`对账挂起：${activeBody.suspendedReason || '委托单号对不上'}`}
+            description="请先到「委托单与对账」关联正确的委托单，再编排道次。"
+          />
+        ) : (
+          <Alert
+            type="info"
+            showIcon
+            style={{ marginBottom: 14 }}
+            message="该件未关联委托单"
+            description="可在「委托单与对账」或胎体台账关联委托单，以便按编号对账与版本追溯。"
+          />
+        )
+      ) : null}
+
       <FilterBar
         keyword={url.keyword}
         onKeywordChange={url.setKeyword}
@@ -456,7 +508,18 @@ export default function CoatBoard() {
             showIcon
             message={`环境适宜时，${PAINT_TYPE_LABEL[form.getFieldValue('paintType') as PaintType] ?? '该漆种'}建议间隔约 ${
               suggestion?.intervalHours ?? suggestIntervalHours('raw')
-            } 小时再进入下一道`}
+            } 小时再进入下一道；当前规格湿膜厚度建议 ${suggestedThickness}μm（荫干时长据此重算）`}
+            action={
+              <Button
+                size="small"
+                onClick={() => {
+                  form.setFieldsValue({ thicknessUm: suggestedThickness });
+                  message.success('已带出建议湿膜厚度');
+                }}
+              >
+                带出建议厚度
+              </Button>
+            }
           />
         </Form>
       </Modal>
