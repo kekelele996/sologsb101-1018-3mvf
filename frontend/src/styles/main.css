@@ -259,3 +259,22 @@ body::before {
 .ant-layout-sider .ant-menu {
   background: transparent;
 }
+
+/* ---------------- 委托 / 对账 ---------------- */
+/* 退回道次（撤单未开工 / 改版退回重排）：整行置灰，与正常在制道次一眼区分 */
+.ant-table-wrapper tr.gb-row-returned > td {
+  background: #f4f1ec !important;
+  color: rgba(42, 28, 22, 0.45);
+}
+
+.ant-table-wrapper tr.gb-row-returned:hover > td {
+  background: #ede8df !important;
+}
+
+.gb-row-drop-target > td {
+  background: #fdf3d8 !important;
+}
+
+.gb-row-dragging {
+  opacity: 0.55;
+}

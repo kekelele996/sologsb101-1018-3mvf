@@ -27,6 +27,18 @@ export interface Coat {
   state: CoatState;
   /** 荫房判定异常时回写的「待复检」标记 */
   needRecheck: boolean;
+  /**
+   * 本道施工所依据的委托版本号（Commission.revisionNo）。
+   * 委托人改版后：已落的道次保留旧值，道次页据此写明「依据第 n 版」；
+   * 新开的道次取委托最新版。无单胎体为 null。
+   */
+  basisRevision: number | null;
+  /**
+   * 退回标记：胎体认的委托改版且选择「退回重排」时，
+   * 所有未涂（state === 'todo'）道次置为退回；已涂道次保留。
+   * 撤单同理（未开工退回，已髹涂留存）。
+   */
+  returned: boolean;
   createdAt: number;
   updatedAt: number;
 }
@@ -91,5 +103,7 @@ export function createEmptyCoatDraft(bodyId: string, seq: number): CoatDraft {
     thicknessUm: 40,
     state: 'todo',
     needRecheck: false,
+    basisRevision: null,
+    returned: false,
   };
 }

@@ -28,17 +28,18 @@ import FilterBar, { useFilterQuery, type FilterSelectConfig } from '@/components
 import StatBadge from '@/components/common/StatBadge';
 import StageTag from '@/components/common/StageTag';
 import { useCoatProgress } from '@/hooks/useCoatProgress';
-import { useIdbTable } from '@/hooks/useIdbTable';
 import { ROUTES } from '@/router';
 import { DEFAULT_BODY_FILTERS, selectFilteredBodies, useBodyStore } from '@/stores/bodyStore';
 import { useCoatStore } from '@/stores/coatStore';
-import type { Inlay } from '@/types/inlay';
+import { useCommissionStore } from '@/stores/commissionStore';
 import {
   BODY_MATERIAL_LABEL,
   BODY_MATERIAL_OPTIONS,
   BODY_SHAPE_LABEL,
   BODY_SHAPE_OPTIONS,
   BODY_STATE_OPTIONS,
+  RECON_STATUS_COLOR,
+  RECON_STATUS_LABEL,
   createEmptyBodyDraft,
   type Body,
   type BodyDraft,
@@ -71,9 +72,9 @@ export default function BodyList() {
   const setMaterials = useBodyStore((state) => state.setMaterials);
   const setShapes = useBodyStore((state) => state.setShapes);
 
-  const inlayTable = useIdbTable<Inlay>((database) => database.inlays, { sortByUpdatedAt: false });
   const { progressOf, currentCoatText, totals } = useCoatProgress();
   const coats = useCoatStore((state) => state.coats);
+  const commissionById = useCommissionStore((state) => state.commissionById);
 
   const url = useFilterQuery(FILTER_KEYS);
   const [editing, setEditing] = useState<Body | null>(null);
@@ -87,6 +88,9 @@ export default function BodyList() {
   }, [url.keyword, url.values, setKeyword, setMaterials, setShapes]);
 
   const filtered = useMemo(() => selectFilteredBodies(bodies, filters), [bodies, filters]);
+  const activeFiltered = useMemo(() => filtered.filter((body) => !body.returned), [filtered]);
+  const returnedFiltered = useMemo(() => filtered.filter((body) => body.returned), [filtered]);
+  const heldCount = bodies.filter((body) => body.reconStatus === 'held' && !body.returned).length;
 
   const openCreate = (): void => {
     setEditing(null);
@@ -124,8 +128,6 @@ export default function BodyList() {
     message.success(`已删除胎体 ${body.code} 及其关联记录`);
   };
 
-  const inlayTotal = inlayTable.rows.length;
-
   return (
     <div>
       <div className="gb-page-head">
@@ -134,6 +136,7 @@ export default function BodyList() {
           <p>登记胎骨材质、器型与尺寸；卡片回显道次完成度、当前道次与最近一次荫房判定。</p>
         </div>
         <Space>
+          <Button onClick={() => navigate(ROUTES.desk)}>前往接单前台</Button>
           <Button onClick={() => navigate(ROUTES.coats)}>前往道次编排</Button>
           <Button type="primary" icon={<PlusOutlined />} onClick={openCreate}>
             新建胎体
@@ -144,9 +147,9 @@ export default function BodyList() {
       <div className="gb-stat-row">
         <StatBadge label="胎体总数" value={bodies.length} suffix="件" tone="primary" />
         <StatBadge label="道次完成率" value={`${totals.percent}%`} percent={totals.percent} tone="success" />
+        <StatBadge label="挂起待判" value={heldCount} suffix="件" tone="danger" />
         <StatBadge label="待复检道次" value={totals.recheck} suffix="道" tone="warning" />
-        <StatBadge label="荫房超标" value={totals.roomOver} suffix="次" tone="danger" />
-        <StatBadge label="镶嵌登记" value={inlayTotal} suffix="条" tone="info" />
+        <StatBadge label="已退回" value={bodies.filter((b) => b.returned).length} suffix="件" tone="info" />
       </div>
 
       <FilterBar
@@ -164,24 +167,25 @@ export default function BodyList() {
       />
 
       <div style={{ marginTop: 16 }}>
-        {filtered.length === 0 ? (
+        {activeFiltered.length === 0 ? (
           <EmptyPanel
-            title={bodies.length === 0 ? '还没有登记任何胎体' : '当前筛选条件下没有胎体'}
+            title={bodies.filter((b) => !b.returned).length === 0 ? '还没有登记在制胎体' : '当前筛选条件下没有胎体'}
             description={
-              bodies.length === 0
-                ? '先登记一件胎体的材质与器型，再逐道编排髹涂工序。'
+              bodies.filter((b) => !b.returned).length === 0
+                ? '先在接单前台登记委托单，或直接登记一件胎体（无单胎体会单列），再逐道编排髹涂工序。'
                 : '试着放宽材质或器型条件，或重置筛选。'
             }
             actionText="新建胎体"
             onAction={openCreate}
-            secondaryText="重置筛选"
-            onSecondary={() => url.reset()}
+            secondaryText={bodies.length === 0 ? undefined : '去接单前台'}
+            onSecondary={() => navigate(ROUTES.desk)}
           />
         ) : (
           <Row gutter={[16, 16]}>
-            {filtered.map((body) => {
+            {activeFiltered.map((body) => {
               const stat = progressOf(body.id);
               const recheck = coats.some((coat) => coat.bodyId === body.id && coat.needRecheck);
+              const commission = body.commissionId ? commissionById(body.commissionId) : undefined;
               return (
                 <Col key={body.id} xs={24} md={12} xl={8}>
                   <Card
@@ -190,6 +194,9 @@ export default function BodyList() {
                       <Space size={6} wrap>
                         <Tag color="#8c2f1f">{body.code}</Tag>
                         <StageTag state={body.state} needRecheck={recheck} />
+                        {body.reconStatus !== 'linked' ? (
+                          <Tag color={RECON_STATUS_COLOR[body.reconStatus]}>{RECON_STATUS_LABEL[body.reconStatus]}</Tag>
+                        ) : null}
                       </Space>
                     }
                     extra={
@@ -213,7 +220,22 @@ export default function BodyList() {
                         <Tag>{BODY_SHAPE_LABEL[body.shape]}</Tag>
                         <Tag color="gold">{body.sizeMm} mm</Tag>
                       </Space>
-                      <Typography.Text type="secondary">委托 / 藏家：{body.ownerName || '未填写'}</Typography.Text>
+                      <Typography.Text type="secondary">
+                        认单：
+                        {commission ? (
+                          <Tag color="geekblue" style={{ marginInlineStart: 4 }}>
+                            {commission.code} · v{body.specRevision ?? 1}
+                          </Tag>
+                        ) : (
+                          <Tag style={{ marginInlineStart: 4 }}>无单</Tag>
+                        )}
+                        委托人：{commission?.clientName ?? (body.ownerName || '未填写')}
+                      </Typography.Text>
+                      {body.reconStatus === 'held' ? (
+                        <Typography.Text type="danger" style={{ fontSize: 12 }}>
+                          挂起原因：{body.reconNote || '两边对不上号，等人工判定'}
+                        </Typography.Text>
+                      ) : null}
                       <Typography.Text>
                         道次完成 <strong>{stat.coatDone}</strong> / {stat.coatTotal}（{stat.coatPercent}%）
                         {stat.currentSeq > 0 ? ` · 当前第 ${stat.currentSeq} 道` : ' · 全部完成'}
@@ -251,6 +273,30 @@ export default function BodyList() {
             })}
           </Row>
         )}
+
+        {returnedFiltered.length > 0 ? (
+          <div style={{ marginTop: 22 }}>
+            <Typography.Title level={5} style={{ color: 'rgba(42,28,22,0.55)' }}>
+              已退回排产（撤单未开工 / 改版退回重排）· {returnedFiltered.length} 件
+            </Typography.Title>
+            <Row gutter={[16, 16]}>
+              {returnedFiltered.map((body) => (
+                <Col key={body.id} xs={24} md={12} xl={8}>
+                  <Card size="small" style={{ opacity: 0.75 }}>
+                    <Space direction="vertical" size={4}>
+                      <Space size={6} wrap>
+                        <Tag color="#8c2f1f">{body.code}</Tag>
+                        <Tag>{BODY_SHAPE_LABEL[body.shape]} · {body.sizeMm}mm</Tag>
+                        <Tag color="default">已退回</Tag>
+                      </Space>
+                      <Typography.Text type="secondary" style={{ fontSize: 12 }}>{body.reconNote || '委托撤单 / 改版后退回'}</Typography.Text>
+                    </Space>
+                  </Card>
+                </Col>
+              ))}
+            </Row>
+          </div>
+        ) : null}
       </div>
 
       <Modal

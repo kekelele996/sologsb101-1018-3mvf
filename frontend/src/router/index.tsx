@@ -8,6 +8,7 @@ import { Navigate, type RouteObject } from 'react-router-dom';
 import { Skeleton } from 'antd';
 import App from '../App';
 
+const FrontDesk = lazy(() => import('../pages/FrontDesk'));
 const BodyList = lazy(() => import('../pages/BodyList'));
 const CoatBoard = lazy(() => import('../pages/CoatBoard'));
 const RoomLog = lazy(() => import('../pages/RoomLog'));
@@ -17,6 +18,7 @@ const ExportView = lazy(() => import('../pages/ExportView'));
 
 /** ROUTES 常量：页面与导航统一引用，避免散落硬编码 */
 export const ROUTES = {
+  desk: '/desk',
   bodies: '/bodies',
   coats: '/coats',
   rooms: '/rooms',
@@ -45,14 +47,15 @@ export const appRoutes: RouteObject[] = [
     path: '/',
     element: <App />,
     children: [
-      { index: true, element: <Navigate to={ROUTES.bodies} replace /> },
+      { index: true, element: <Navigate to={ROUTES.desk} replace /> },
+      { path: 'desk', element: withSuspense(<FrontDesk />) },
       { path: 'bodies', element: withSuspense(<BodyList />) },
       { path: 'coats', element: withSuspense(<CoatBoard />) },
       { path: 'rooms', element: withSuspense(<RoomLog />) },
       { path: 'polish', element: withSuspense(<PolishBoard />) },
       { path: 'inlays', element: withSuspense(<InlayBoard />) },
       { path: 'export', element: withSuspense(<ExportView />) },
-      { path: '*', element: <Navigate to={ROUTES.bodies} replace /> },
+      { path: '*', element: <Navigate to={ROUTES.desk} replace /> },
     ],
   },
 ];

@@ -58,7 +58,8 @@ export default function PolishBoard() {
   const [open, setOpen] = useState(false);
   const [editing, setEditing] = useState<Polish | null>(null);
 
-  const activeBody = bodies.find((body) => body.id === currentBodyId) ?? bodies[0] ?? null;
+  const selectableBodies = useMemo(() => bodies.filter((body) => !body.returned), [bodies]);
+  const activeBody = bodies.find((body) => body.id === currentBodyId) ?? selectableBodies[0] ?? null;
   const bodyId = activeBody?.id ?? '';
 
   const bodyCoats = useMemo(
@@ -217,7 +218,7 @@ export default function PolishBoard() {
             style={{ minWidth: 220 }}
             placeholder="选择胎体"
             value={bodyId || undefined}
-            options={bodies.map((body) => ({
+            options={selectableBodies.map((body) => ({
               value: body.id,
               label: `${body.code} · ${BODY_SHAPE_LABEL[body.shape]}`,
             }))}

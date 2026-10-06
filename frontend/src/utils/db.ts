@@ -1,7 +1,10 @@
 /**
  * IndexedDB 持久化层（Dexie 封装）
- * - 数据结构版本号与升级迁移逻辑（v1 → v2：Coat 增加 paintType 索引并回填历史记录）
- * - 六张业务表的增删改查与整库导入导出
+ * - 数据结构版本号与升级迁移逻辑：
+ *   v1 → v2：Coat 增加 paintType 索引并回填历史记录
+ *   v2 → v3：新增前台 commissions 委托单表；胎体按委托人回填委托单号，
+ *            填不出的进入「无单单列」；Coat 增加依据版本 / 退回标记
+ * - 业务表的增删改查与整库导入导出
  * - 首次打开自动播种互相引用的演示数据（幂等）
  * 纯前端应用：不依赖任何后端服务或数据库。
  */
@@ -12,12 +15,13 @@ import type { Room } from '@/types/room';
 import type { Polish } from '@/types/polish';
 import type { Inlay } from '@/types/inlay';
 import type { Inspect } from '@/types/inspect';
+import type { Commission } from '@/types/commission';
 
 /** 数据库名（README 与导出文件均使用该名称） */
 export const DB_NAME = 'gblacquer';
 
 /** 当前数据结构版本号 */
-export const DB_SCHEMA_VERSION = 2;
+export const DB_SCHEMA_VERSION = 3;
 
 /** localStorage 侧少量元数据键 */
 export const LS_KEYS = {
@@ -78,6 +82,7 @@ export function writeLastBackupAt(value: string): void {
 }
 
 class LacquerDatabase extends Dexie {
+  commissions!: Table<Commission, string>;
   bodies!: Table<Body, string>;
   coats!: Table<Coat, string>;
   rooms!: Table<Room, string>;
@@ -99,16 +104,31 @@ class LacquerDatabase extends Dexie {
     });
 
     // v2：Coat 增加 paintType 索引；历史记录缺少 paintType 时按「生漆」回填
+    this.version(2).stores({
+      bodies: 'id, code, material, shape, state, updatedAt',
+      coats: 'id, bodyId, seq, paintType, state, needRecheck, updatedAt',
+      rooms: 'id, bodyId, date, verdict, updatedAt',
+      polishes: 'id, bodyId, seq, method, updatedAt',
+      inlays: 'id, bodyId, type, position, updatedAt',
+      inspects: 'id, bodyId, verdict, date, updatedAt',
+    });
+
+    // v3：前台委托单上系统
+    // - 新增 commissions 表（前台记委托人、器型、尺寸、交期，与工序台各记各的）
+    // - bodies 增加 commissionId / reconStatus 索引；旧胎体按委托人回填委托单
+    // - coats 增加 basisRevision 索引；旧道次统一按委托第 1 版回填
     this.version(DB_SCHEMA_VERSION)
       .stores({
-        bodies: 'id, code, material, shape, state, updatedAt',
-        coats: 'id, bodyId, seq, paintType, state, needRecheck, updatedAt',
+        commissions: 'id, code, clientName, status, dueDate, updatedAt',
+        bodies: 'id, code, commissionId, reconStatus, material, shape, state, returned, updatedAt',
+        coats: 'id, bodyId, seq, paintType, state, needRecheck, basisRevision, returned, updatedAt',
         rooms: 'id, bodyId, date, verdict, updatedAt',
         polishes: 'id, bodyId, seq, method, updatedAt',
         inlays: 'id, bodyId, type, position, updatedAt',
         inspects: 'id, bodyId, verdict, date, updatedAt',
       })
       .upgrade(async (tx) => {
+        // v2 结构补齐（老库停留在更早版本时 Dexie 会依次执行，这里做幂等兜底）
         await tx
           .table<Coat>('coats')
           .toCollection()
@@ -118,14 +138,74 @@ class LacquerDatabase extends Dexie {
             if (typeof coat.needRecheck !== 'boolean') coat.needRecheck = false;
             if (typeof coat.thicknessUm !== 'number') coat.thicknessUm = 40;
           });
+
+        const oldBodies = await tx.table<Body>('bodies').toArray();
+
+        // 旧数据里的胎体缺委托单号：按委托人回填。
+        // 同一委托人下的胎体各补一张补录委托单（单号 WT-回填-<胎体号>），
+        // 委托人缺失（自藏 / 未填）的回填不出来 —— 进「无单单列」。
+        const backfilled: Commission[] = [];
+        const bodyCommissionId = new Map<string, string>();
+        oldBodies.forEach((body) => {
+          const owner = body.ownerName?.trim() ?? '';
+          if (owner.length === 0) return;
+          const commissionId = `comm_backfill_${body.id}`;
+          bodyCommissionId.set(body.id, commissionId);
+          backfilled.push({
+            id: commissionId,
+            code: `WT-回填-${body.code}`,
+            clientName: owner,
+            contact: '',
+            material: body.material,
+            dueDate: '',
+            status: 'active',
+            revisions: [
+              {
+                revisionNo: 1,
+                shape: body.shape,
+                sizeMm: body.sizeMm,
+                note: '旧数据升级：按委托人自动补录的委托单',
+                changedAt: body.createdAt,
+              },
+            ],
+            cancelledAt: null,
+            cancelNote: '',
+            createdAt: body.createdAt,
+            updatedAt: Date.now(),
+          });
+        });
+        if (backfilled.length > 0) await tx.table<Commission>('commissions').bulkPut(backfilled);
+
+        await tx
+          .table<Body>('bodies')
+          .toCollection()
+          .modify((body) => {
+            // 旧库无 commissionId 字段（undefined）：按委托人回填，填不出来为 null（无单单列）
+            if (body.commissionId === undefined) body.commissionId = bodyCommissionId.get(body.id) ?? null;
+            body.reconStatus = body.commissionId ? 'linked' : 'unlinked';
+            body.reconNote = body.commissionId ? '' : '旧数据无委托单号，且按委托人回填不出来，单列待补';
+            body.specRevision = body.commissionId ? 1 : null;
+            body.specPolicy = null;
+            body.returned = false;
+          });
+
+        // 旧道次：认到委托的按第 1 版回填依据版本，认不到的留 null；均不在退回态
+        await tx
+          .table<Coat>('coats')
+          .toCollection()
+          .modify((coat) => {
+            const commissionId = bodyCommissionId.get(coat.bodyId);
+            if (coat.basisRevision === undefined) coat.basisRevision = commissionId ? 1 : null;
+            if (typeof coat.returned !== 'boolean') coat.returned = false;
+          });
       });
   }
 }
 
 export const db = new LacquerDatabase();
 
-/** 六张业务表清单，事务中统一引用 */
-const TABLE_LIST = [db.bodies, db.coats, db.rooms, db.polishes, db.inlays, db.inspects];
+/** 业务表清单，事务中统一引用 */
+const TABLE_LIST = [db.commissions, db.bodies, db.coats, db.rooms, db.polishes, db.inlays, db.inspects];
 
 /** 生成主键：短前缀 + 时间戳 + 随机串，避免多标签页写入冲突 */
 export function createId(prefix: string): string {
@@ -143,10 +223,91 @@ export async function initDatabase(): Promise<void> {
 }
 
 /* ------------------------------ 播种数据 ------------------------------ */
-/* 三层互相引用：Body →（Coat / Room / Polish / Inlay）→ Inspect，id 固定便于深链命中 */
+/* 四层互相引用：Commission → Body →（Coat / Room / Polish / Inlay）→ Inspect，
+   id 固定便于深链命中；覆盖认单、改版照旧、改版重排、撤单留存、有单无胎、无单单列、挂起七种情形。 */
 
 export async function seedDatabase(): Promise<void> {
   const now = Date.now();
+
+  const commissions: Commission[] = [
+    {
+      id: 'comm_01',
+      code: 'WT-2601',
+      clientName: '陈氏委托',
+      contact: '陈师傅 138****0101',
+      material: 'wood',
+      dueDate: '2026-04-20',
+      status: 'active',
+      revisions: [
+        { revisionNo: 1, shape: 'bowl', sizeMm: 152, note: '初版：木胎碗', changedAt: now - 86400000 * 13 },
+        { revisionNo: 2, shape: 'bowl', sizeMm: 140, note: '委托人要求口径收小至 140mm', changedAt: now - 86400000 * 6 },
+      ],
+      cancelledAt: null,
+      cancelNote: '',
+      createdAt: now - 86400000 * 13,
+      updatedAt: now - 86400000 * 6,
+    },
+    {
+      id: 'comm_02',
+      code: 'WT-2602',
+      clientName: '林氏定制',
+      contact: '',
+      material: 'lacquered',
+      dueDate: '2026-04-12',
+      status: 'active',
+      revisions: [
+        { revisionNo: 1, shape: 'box', sizeMm: 96, note: '初版：脱胎盒', changedAt: now - 86400000 * 10 },
+        { revisionNo: 2, shape: 'plate', sizeMm: 120, note: '改器型：盒改盘，尺寸放大', changedAt: now - 86400000 * 4 },
+      ],
+      cancelledAt: null,
+      cancelNote: '',
+      createdAt: now - 86400000 * 10,
+      updatedAt: now - 86400000 * 4,
+    },
+    {
+      id: 'comm_03',
+      code: 'WT-2603',
+      clientName: '市工艺美术馆',
+      contact: '周老师',
+      material: 'metal',
+      dueDate: '2026-03-15',
+      status: 'done',
+      revisions: [{ revisionNo: 1, shape: 'vase', sizeMm: 210, note: '初版：金属胎赏瓶', changedAt: now - 86400000 * 31 }],
+      cancelledAt: null,
+      cancelNote: '',
+      createdAt: now - 86400000 * 31,
+      updatedAt: now - 86400000 * 4,
+    },
+    {
+      id: 'comm_04',
+      code: 'WT-2604',
+      clientName: '吴氏委托',
+      contact: '',
+      material: 'wood',
+      dueDate: '2026-04-30',
+      status: 'cancelled',
+      revisions: [{ revisionNo: 1, shape: 'plate', sizeMm: 180, note: '初版：木胎大盘', changedAt: now - 86400000 * 8 }],
+      cancelledAt: now - 86400000 * 3,
+      cancelNote: '委托人因故撤单：已髹涂部分留存，未开工道次退回',
+      createdAt: now - 86400000 * 8,
+      updatedAt: now - 86400000 * 3,
+    },
+    {
+      id: 'comm_05',
+      code: 'WT-2605',
+      clientName: '郑氏委托',
+      contact: '',
+      material: 'wood',
+      dueDate: '2026-05-10',
+      status: 'active',
+      revisions: [{ revisionNo: 1, shape: 'box', sizeMm: 110, note: '初版：木胎捧盒，尚未开胎', changedAt: now - 86400000 * 2 }],
+      cancelledAt: null,
+      cancelNote: '',
+      createdAt: now - 86400000 * 2,
+      updatedAt: now - 86400000 * 2,
+    },
+  ];
+
   const bodies: Body[] = [
     {
       id: 'body_01',
@@ -156,6 +317,12 @@ export async function seedDatabase(): Promise<void> {
       sizeMm: 152,
       ownerName: '陈氏委托',
       state: 'coating',
+      commissionId: 'comm_01',
+      reconStatus: 'linked',
+      reconNote: '',
+      specRevision: 1,
+      specPolicy: 'finishOld',
+      returned: false,
       createdAt: now - 86400000 * 12,
       updatedAt: now - 86400000 * 2,
     },
@@ -163,10 +330,16 @@ export async function seedDatabase(): Promise<void> {
       id: 'body_02',
       code: 'LQ-2402',
       material: 'lacquered',
-      shape: 'box',
-      sizeMm: 96,
-      ownerName: '工作室自藏',
+      shape: 'plate',
+      sizeMm: 120,
+      ownerName: '林氏定制',
       state: 'drying',
+      commissionId: 'comm_02',
+      reconStatus: 'linked',
+      reconNote: '',
+      specRevision: 2,
+      specPolicy: 'reschedule',
+      returned: false,
       createdAt: now - 86400000 * 9,
       updatedAt: now - 86400000,
     },
@@ -178,20 +351,82 @@ export async function seedDatabase(): Promise<void> {
       sizeMm: 210,
       ownerName: '市工艺美术馆',
       state: 'done',
+      commissionId: 'comm_03',
+      reconStatus: 'linked',
+      reconNote: '',
+      specRevision: 1,
+      specPolicy: null,
+      returned: false,
       createdAt: now - 86400000 * 30,
       updatedAt: now - 86400000 * 4,
+    },
+    {
+      id: 'body_04',
+      code: 'LQ-2404',
+      material: 'wood',
+      shape: 'plate',
+      sizeMm: 180,
+      ownerName: '吴氏委托',
+      state: 'coating',
+      commissionId: 'comm_04',
+      reconStatus: 'linked',
+      reconNote: '',
+      specRevision: 1,
+      specPolicy: null,
+      returned: false,
+      createdAt: now - 86400000 * 7,
+      updatedAt: now - 86400000 * 3,
+    },
+    {
+      id: 'body_05',
+      code: 'LQ-2405',
+      material: 'wood',
+      shape: 'vase',
+      sizeMm: 160,
+      ownerName: '',
+      state: 'pending',
+      commissionId: null,
+      reconStatus: 'unlinked',
+      reconNote: '工作室自存胎，无委托单',
+      specRevision: null,
+      specPolicy: null,
+      returned: false,
+      createdAt: now - 86400000 * 2,
+      updatedAt: now - 86400000 * 2,
+    },
+    {
+      id: 'body_06',
+      code: 'LQ-2406',
+      material: 'wood',
+      shape: 'bowl',
+      sizeMm: 130,
+      ownerName: '手写单已褪色',
+      state: 'pending',
+      commissionId: 'comm_missing_seed',
+      reconStatus: 'held',
+      reconNote: '胎体认的委托单号在前台台账中查不到',
+      specRevision: 1,
+      specPolicy: null,
+      returned: false,
+      createdAt: now - 86400000,
+      updatedAt: now - 86400000,
     },
   ];
 
   const coats: Coat[] = [
-    { id: 'coat_0101', bodyId: 'body_01', seq: 1, paintType: 'raw', colorName: '漆黑', coatDate: '2026-03-02', thicknessUm: 40, state: 'done', needRecheck: false, createdAt: now - 86400000 * 11, updatedAt: now - 86400000 * 10 },
-    { id: 'coat_0102', bodyId: 'body_01', seq: 2, paintType: 'color', colorName: '朱红', coatDate: '2026-03-06', thicknessUm: 45, state: 'toPolish', needRecheck: true, createdAt: now - 86400000 * 7, updatedAt: now - 86400000 * 2 },
-    { id: 'coat_0103', bodyId: 'body_01', seq: 3, paintType: 'topcoat', colorName: '推光本色', coatDate: '2026-03-12', thicknessUm: 30, state: 'todo', needRecheck: false, createdAt: now - 86400000 * 6, updatedAt: now - 86400000 * 6 },
-    { id: 'coat_0201', bodyId: 'body_02', seq: 1, paintType: 'raw', colorName: '漆黑', coatDate: '2026-03-03', thicknessUm: 35, state: 'done', needRecheck: false, createdAt: now - 86400000 * 8, updatedAt: now - 86400000 * 7 },
-    { id: 'coat_0202', bodyId: 'body_02', seq: 2, paintType: 'color', colorName: '赭石', coatDate: '2026-03-08', thicknessUm: 42, state: 'coated', needRecheck: true, createdAt: now - 86400000 * 5, updatedAt: now - 86400000 },
-    { id: 'coat_0301', bodyId: 'body_03', seq: 1, paintType: 'raw', colorName: '漆黑', coatDate: '2026-02-10', thicknessUm: 38, state: 'done', needRecheck: false, createdAt: now - 86400000 * 26, updatedAt: now - 86400000 * 25 },
-    { id: 'coat_0302', bodyId: 'body_03', seq: 2, paintType: 'color', colorName: '石绿', coatDate: '2026-02-18', thicknessUm: 44, state: 'done', needRecheck: false, createdAt: now - 86400000 * 20, updatedAt: now - 86400000 * 18 },
-    { id: 'coat_0303', bodyId: 'body_03', seq: 3, paintType: 'topcoat', colorName: '描金', coatDate: '2026-02-26', thicknessUm: 28, state: 'done', needRecheck: false, createdAt: now - 86400000 * 14, updatedAt: now - 86400000 * 4 },
+    // body_01：委托已改版到 v2，本件照旧做完 —— 已落道次写明依据第 1 版
+    { id: 'coat_0101', bodyId: 'body_01', seq: 1, paintType: 'raw', colorName: '漆黑', coatDate: '2026-03-02', thicknessUm: 40, state: 'done', needRecheck: false, basisRevision: 1, returned: false, createdAt: now - 86400000 * 11, updatedAt: now - 86400000 * 10 },
+    { id: 'coat_0102', bodyId: 'body_01', seq: 2, paintType: 'color', colorName: '朱红', coatDate: '2026-03-06', thicknessUm: 45, state: 'toPolish', needRecheck: true, basisRevision: 1, returned: false, createdAt: now - 86400000 * 7, updatedAt: now - 86400000 * 2 },
+    { id: 'coat_0103', bodyId: 'body_01', seq: 3, paintType: 'topcoat', colorName: '推光本色', coatDate: '2026-03-12', thicknessUm: 30, state: 'todo', needRecheck: false, basisRevision: 2, returned: false, createdAt: now - 86400000 * 6, updatedAt: now - 86400000 * 6 },
+    // body_02：盒改盘并选「退回重排」—— 第 1 道已涂保留（依据 v1），第 2 道未涂标退回
+    { id: 'coat_0201', bodyId: 'body_02', seq: 1, paintType: 'raw', colorName: '漆黑', coatDate: '2026-03-03', thicknessUm: 35, state: 'coated', needRecheck: false, basisRevision: 1, returned: false, createdAt: now - 86400000 * 8, updatedAt: now - 86400000 * 7 },
+    { id: 'coat_0202', bodyId: 'body_02', seq: 2, paintType: 'color', colorName: '赭石', coatDate: '2026-03-08', thicknessUm: 42, state: 'todo', needRecheck: false, basisRevision: 1, returned: true, createdAt: now - 86400000 * 5, updatedAt: now - 86400000 },
+    { id: 'coat_0301', bodyId: 'body_03', seq: 1, paintType: 'raw', colorName: '漆黑', coatDate: '2026-02-10', thicknessUm: 38, state: 'done', needRecheck: false, basisRevision: 1, returned: false, createdAt: now - 86400000 * 26, updatedAt: now - 86400000 * 25 },
+    { id: 'coat_0302', bodyId: 'body_03', seq: 2, paintType: 'color', colorName: '石绿', coatDate: '2026-02-18', thicknessUm: 44, state: 'done', needRecheck: false, basisRevision: 1, returned: false, createdAt: now - 86400000 * 20, updatedAt: now - 86400000 * 18 },
+    { id: 'coat_0303', bodyId: 'body_03', seq: 3, paintType: 'topcoat', colorName: '描金', coatDate: '2026-02-26', thicknessUm: 28, state: 'done', needRecheck: false, basisRevision: 1, returned: false, createdAt: now - 86400000 * 14, updatedAt: now - 86400000 * 4 },
+    // body_04：撤单 —— 已髹涂的第 1 道留存，未开工的第 2 道退回
+    { id: 'coat_0401', bodyId: 'body_04', seq: 1, paintType: 'raw', colorName: '漆黑', coatDate: '2026-03-05', thicknessUm: 42, state: 'coated', needRecheck: false, basisRevision: 1, returned: false, createdAt: now - 86400000 * 6, updatedAt: now - 86400000 * 5 },
+    { id: 'coat_0402', bodyId: 'body_04', seq: 2, paintType: 'color', colorName: '朱红', coatDate: '', thicknessUm: 40, state: 'todo', needRecheck: false, basisRevision: 1, returned: true, createdAt: now - 86400000 * 4, updatedAt: now - 86400000 * 3 },
   ];
 
   const rooms: Room[] = [
@@ -221,6 +456,7 @@ export async function seedDatabase(): Promise<void> {
   ];
 
   await db.transaction('rw', TABLE_LIST, async () => {
+    await db.commissions.bulkPut(commissions);
     await db.bodies.bulkPut(bodies);
     await db.coats.bulkPut(coats);
     await db.rooms.bulkPut(rooms);
@@ -236,6 +472,7 @@ export interface LacquerSnapshot {
   app: typeof DB_NAME;
   schemaVersion: number;
   exportedAt: string;
+  commissions: Commission[];
   bodies: Body[];
   coats: Coat[];
   rooms: Room[];
@@ -245,7 +482,8 @@ export interface LacquerSnapshot {
 }
 
 export async function exportSnapshot(): Promise<LacquerSnapshot> {
-  const [bodies, coats, rooms, polishes, inlays, inspects] = await Promise.all([
+  const [commissions, bodies, coats, rooms, polishes, inlays, inspects] = await Promise.all([
+    db.commissions.toArray(),
     db.bodies.toArray(),
     db.coats.toArray(),
     db.rooms.toArray(),
@@ -257,6 +495,7 @@ export async function exportSnapshot(): Promise<LacquerSnapshot> {
     app: DB_NAME,
     schemaVersion: DB_SCHEMA_VERSION,
     exportedAt: new Date().toISOString(),
+    commissions,
     bodies,
     coats,
     rooms,
@@ -271,7 +510,9 @@ export function validateSnapshot(input: unknown): string {
   if (typeof input !== 'object' || input === null) return '文件内容不是合法的 JSON 对象';
   const snapshot = input as Partial<LacquerSnapshot>;
   if (snapshot.app !== DB_NAME) return `备份文件不属于本项目（app=${String(snapshot.app)}）`;
-  const keys: Array<keyof LacquerSnapshot> = ['bodies', 'coats', 'rooms', 'polishes', 'inlays', 'inspects'];
+  const keys: Array<keyof LacquerSnapshot> = ['commissions', 'bodies', 'coats', 'rooms', 'polishes', 'inlays', 'inspects'];
+  // commissions 为 v3 新增：老备份没有时按空集合兼容
+  if (snapshot.commissions === undefined) snapshot.commissions = [];
   for (const key of keys) {
     if (!Array.isArray(snapshot[key])) return `备份文件缺少 ${String(key)} 集合`;
   }
@@ -281,6 +522,7 @@ export function validateSnapshot(input: unknown): string {
 export async function importSnapshot(snapshot: LacquerSnapshot): Promise<void> {
   await clearAllTables();
   await db.transaction('rw', TABLE_LIST, async () => {
+    await db.commissions.bulkPut(snapshot.commissions ?? []);
     await db.bodies.bulkPut(snapshot.bodies);
     await db.coats.bulkPut(snapshot.coats);
     await db.rooms.bulkPut(snapshot.rooms);
@@ -293,6 +535,7 @@ export async function importSnapshot(snapshot: LacquerSnapshot): Promise<void> {
 export async function clearAllTables(): Promise<void> {
   await db.transaction('rw', TABLE_LIST, async () => {
     await Promise.all([
+      db.commissions.clear(),
       db.bodies.clear(),
       db.coats.clear(),
       db.rooms.clear(),
@@ -310,7 +553,8 @@ export async function resetDatabase(): Promise<void> {
 }
 
 export async function countAll(): Promise<Record<string, number>> {
-  const [bodies, coats, rooms, polishes, inlays, inspects] = await Promise.all([
+  const [commissions, bodies, coats, rooms, polishes, inlays, inspects] = await Promise.all([
+    db.commissions.count(),
     db.bodies.count(),
     db.coats.count(),
     db.rooms.count(),
@@ -318,7 +562,7 @@ export async function countAll(): Promise<Record<string, number>> {
     db.inlays.count(),
     db.inspects.count(),
   ]);
-  return { bodies, coats, rooms, polishes, inlays, inspects };
+  return { commissions, bodies, coats, rooms, polishes, inlays, inspects };
 }
 
 /* ------------------------------ 级联删除 ------------------------------ */

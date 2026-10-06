@@ -36,6 +36,7 @@ import StatBadge from '@/components/common/StatBadge';
 import { useIdbTable } from '@/hooks/useIdbTable';
 import { useBodyStore } from '@/stores/bodyStore';
 import { useCoatStore } from '@/stores/coatStore';
+import { useCommissionStore } from '@/stores/commissionStore';
 import { useRoomStore } from '@/stores/roomStore';
 import { COAT_STATE_LABEL, PAINT_TYPE_LABEL } from '@/types/coat';
 import { BODY_SHAPE_LABEL } from '@/types/body';
@@ -74,6 +75,9 @@ export default function ExportView() {
   const loadCoats = useCoatStore((state) => state.loadCoats);
   const rooms = useRoomStore((state) => state.rooms);
   const loadRooms = useRoomStore((state) => state.loadRooms);
+  const commissions = useCommissionStore((state) => state.commissions);
+  const loadCommissions = useCommissionStore((state) => state.loadCommissions);
+  const recomputeReconcile = useCommissionStore((state) => state.recomputeReconcile);
 
   const [open, setOpen] = useState(false);
   const [editing, setEditing] = useState<Inspect | null>(null);
@@ -176,7 +180,8 @@ export default function ExportView() {
       cancelText: '取消',
       onOk: async () => {
         await importSnapshot(parsed as LacquerSnapshot);
-        await Promise.all([loadBodies(), loadCoats(), loadRooms()]);
+        await Promise.all([loadCommissions(), loadBodies(), loadCoats(), loadRooms()]);
+        await recomputeReconcile();
         message.success('导入完成，数据已覆盖');
       },
     });
@@ -184,7 +189,8 @@ export default function ExportView() {
 
   const handleReset = async (): Promise<void> => {
     await resetDatabase();
-    await Promise.all([loadBodies(), loadCoats(), loadRooms()]);
+    await Promise.all([loadCommissions(), loadBodies(), loadCoats(), loadRooms()]);
+    await recomputeReconcile();
     message.success('已清空并重新载入演示数据');
   };
 
@@ -302,9 +308,9 @@ export default function ExportView() {
       </div>
 
       <div className="gb-stat-row">
-        <StatBadge label="质检记录" value={stat.total} suffix="条" tone="primary" />
+        <StatBadge label="委托单" value={commissions.length} suffix="张" tone="primary" />
+        <StatBadge label="质检记录" value={stat.total} suffix="条" tone="info" />
         <StatBadge label="合格率" value={`${stat.passPercent}%`} percent={stat.passPercent} tone="success" />
-        <StatBadge label="合格" value={stat.pass} suffix="条" tone="info" />
         <StatBadge label="返工" value={stat.rework} suffix="条" tone="danger" />
         <StatBadge label="荫房记录" value={rooms.length} suffix="条" tone="warning" />
       </div>
@@ -372,7 +378,7 @@ export default function ExportView() {
           <Card title="整库导出" style={{ marginTop: 16 }}>
             <Space direction="vertical" size={10} style={{ width: '100%' }}>
               <Typography.Text type="secondary">
-                导出文件包含 6 张业务表全量数据与结构版本号，可在其他设备通过「导入 JSON」还原。
+                导出文件包含 7 张业务表（含前台委托单 commissions）全量数据与结构版本号，可在其他设备通过「导入 JSON」还原。
               </Typography.Text>
               <Space wrap>
                 <Button icon={<CloudDownloadOutlined />} onClick={() => void handleExport()}>
@@ -380,7 +386,7 @@ export default function ExportView() {
                 </Button>
                 <Button
                   onClick={() => {
-                    const filename = exportLedgerCsv(bodies, coats, rooms);
+                    const filename = exportLedgerCsv(bodies, coats, rooms, commissions);
                     message.success(`已导出 ${filename}`);
                   }}
                 >

@@ -6,6 +6,7 @@ import type { Body } from '@/types/body';
 import type { Coat } from '@/types/coat';
 import type { Room } from '@/types/room';
 import type { Inspect } from '@/types/inspect';
+import type { Commission } from '@/types/commission';
 import { BODY_MATERIAL_LABEL, BODY_SHAPE_LABEL } from '@/types/body';
 import { COAT_STATE_LABEL, PAINT_TYPE_LABEL } from '@/types/coat';
 import { ROOM_VERDICT_LABEL } from '@/types/room';
@@ -96,19 +97,23 @@ export function exportReworkList(
   return filename;
 }
 
-/** 工序台账 CSV（全部胎体 + 道次 + 荫房） */
-export function exportLedgerCsv(bodies: Body[], coats: Coat[], rooms: Room[]): string {
-  const header = ['胎体编号', '材质', '器型', '尺寸(mm)', '委托/藏家', '道次', '漆种', '色名', '涂刷日期', '湿膜(μm)', '道次状态', '待复检', '荫房日期', '温度(℃)', '湿度(%)', '判定'];
+/** 工序台账 CSV（委托单 + 全部胎体 + 道次 + 荫房） */
+export function exportLedgerCsv(bodies: Body[], coats: Coat[], rooms: Room[], commissions: Commission[] = []): string {
+  const commissionById = new Map(commissions.map((commission) => [commission.id, commission]));
+  const header = ['委托单号', '委托版本', '胎体编号', '材质', '器型', '尺寸(mm)', '委托/藏家', '道次', '漆种', '色名', '涂刷日期', '湿膜(μm)', '道次状态', '依据版本', '退回', '待复检', '荫房日期', '温度(℃)', '湿度(%)', '判定'];
   const lines: string[] = [header.map(csvCell).join(',')];
   bodies.forEach((body) => {
     const bodyCoats = coats.filter((item) => item.bodyId === body.id).sort((a, b) => a.seq - b.seq);
     const bodyRooms = rooms.filter((item) => item.bodyId === body.id);
+    const commission = body.commissionId ? commissionById.get(body.commissionId) : undefined;
     const rowCount = Math.max(bodyCoats.length, bodyRooms.length, 1);
     for (let index = 0; index < rowCount; index += 1) {
       const coat = bodyCoats[index];
       const room = bodyRooms[index];
       lines.push(
         [
+          index === 0 ? commission?.code ?? '' : '',
+          index === 0 && commission ? `v${commission.revisions.length}` : '',
           index === 0 ? body.code : '',
           index === 0 ? BODY_MATERIAL_LABEL[body.material] : '',
           index === 0 ? BODY_SHAPE_LABEL[body.shape] : '',
@@ -120,6 +125,8 @@ export function exportLedgerCsv(bodies: Body[], coats: Coat[], rooms: Room[]): s
           coat ? coat.coatDate : '',
           coat ? coat.thicknessUm : '',
           coat ? COAT_STATE_LABEL[coat.state] : '',
+          coat ? (coat.basisRevision === null ? '无单' : `v${coat.basisRevision}`) : '',
+          coat && coat.returned ? '退回' : '',
           coat ? (coat.needRecheck ? '是' : '否') : '',
           room ? room.date : '',
           room ? room.tempC : '',

@@ -7,6 +7,7 @@ import { Link, Outlet, useLocation, useNavigate } from 'react-router-dom';
 import { App as AntdApp, Badge, Button, Layout, Menu, Space, Tag, Typography } from 'antd';
 import {
   AppstoreOutlined,
+  AuditOutlined,
   BgColorsOutlined,
   CloudOutlined,
   DashboardOutlined,
@@ -17,6 +18,7 @@ import {
 import { ROUTES } from './router';
 import { useBodyStore } from './stores/bodyStore';
 import { useCoatStore } from './stores/coatStore';
+import { useCommissionStore } from './stores/commissionStore';
 import { useRoomStore } from './stores/roomStore';
 import { initDatabase } from './utils/db';
 import { BODY_MATERIAL_LABEL, BODY_SHAPE_LABEL, BODY_STATE_LABEL } from './types/body';
@@ -35,6 +37,9 @@ export default function App() {
   const loadCoats = useCoatStore((state) => state.loadCoats);
   const rooms = useRoomStore((state) => state.rooms);
   const loadRooms = useRoomStore((state) => state.loadRooms);
+  const commissions = useCommissionStore((state) => state.commissions);
+  const loadCommissions = useCommissionStore((state) => state.loadCommissions);
+  const recomputeReconcile = useCommissionStore((state) => state.recomputeReconcile);
 
   useEffect(() => {
     let cancelled = false;
@@ -42,7 +47,10 @@ export default function App() {
       try {
         await initDatabase();
         if (cancelled) return;
-        await Promise.all([loadBodies(), loadCoats(), loadRooms()]);
+        await Promise.all([loadCommissions(), loadBodies(), loadCoats(), loadRooms()]);
+        if (cancelled) return;
+        // 两边数据都到位后按编号对账，对不上的挂起
+        await recomputeReconcile();
       } catch (error) {
         if (cancelled) return;
         message.error(`本地数据库初始化失败：${error instanceof Error ? error.message : '未知错误'}`);
@@ -51,20 +59,22 @@ export default function App() {
     return () => {
       cancelled = true;
     };
-  }, [loadBodies, loadCoats, loadRooms, message]);
+  }, [loadBodies, loadCoats, loadRooms, loadCommissions, recomputeReconcile, message]);
 
   const currentBody = bodies.find((body) => body.id === currentBodyId) ?? null;
-  const selectedKey = location.pathname.startsWith('/coats')
-    ? ROUTES.coats
-    : location.pathname.startsWith('/rooms')
-      ? ROUTES.rooms
-      : location.pathname.startsWith('/polish')
-        ? ROUTES.polish
-        : location.pathname.startsWith('/inlays')
-          ? ROUTES.inlays
-          : location.pathname.startsWith('/export')
-            ? ROUTES.export
-            : ROUTES.bodies;
+  const selectedKey = location.pathname.startsWith('/desk')
+    ? ROUTES.desk
+    : location.pathname.startsWith('/coats')
+      ? ROUTES.coats
+      : location.pathname.startsWith('/rooms')
+        ? ROUTES.rooms
+        : location.pathname.startsWith('/polish')
+          ? ROUTES.polish
+          : location.pathname.startsWith('/inlays')
+            ? ROUTES.inlays
+            : location.pathname.startsWith('/export')
+              ? ROUTES.export
+              : ROUTES.bodies;
 
   return (
     <Layout style={{ minHeight: '100vh', background: 'transparent' }}>
@@ -84,6 +94,7 @@ export default function App() {
           style={{ background: 'transparent' }}
           onClick={({ key }) => navigate(key)}
           items={[
+            { key: ROUTES.desk, icon: <AuditOutlined />, label: '接单前台' },
             { key: ROUTES.bodies, icon: <AppstoreOutlined />, label: '胎体与器型' },
             { key: ROUTES.coats, icon: <FormatPainterOutlined />, label: '髹涂道次' },
             { key: ROUTES.rooms, icon: <CloudOutlined />, label: '荫房记录' },
@@ -94,6 +105,9 @@ export default function App() {
         />
         <div style={{ padding: '12px 16px', color: 'rgba(242,223,184,0.6)', fontSize: 12 }}>
           <Space direction="vertical" size={2}>
+            <span>
+              <AuditOutlined /> 委托单 {commissions.length} 张
+            </span>
             <span>
               <DashboardOutlined /> 胎体 {bodies.length} 件
             </span>

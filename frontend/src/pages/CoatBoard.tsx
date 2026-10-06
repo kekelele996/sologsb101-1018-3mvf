@@ -27,6 +27,7 @@ import {
   EditOutlined,
   HolderOutlined,
   PlusOutlined,
+  RedoOutlined,
   ThunderboltOutlined,
 } from '@ant-design/icons';
 import EmptyPanel from '@/components/common/EmptyPanel';
@@ -36,6 +37,7 @@ import StageTag from '@/components/common/StageTag';
 import { useCoatProgress } from '@/hooks/useCoatProgress';
 import { useBodyStore } from '@/stores/bodyStore';
 import { useCoatStore } from '@/stores/coatStore';
+import { useCommissionStore } from '@/stores/commissionStore';
 import {
   COAT_STATE_LABEL,
   COAT_STATE_OPTIONS,
@@ -48,7 +50,8 @@ import {
   type CoatState,
   type PaintType,
 } from '@/types/coat';
-import { BODY_SHAPE_LABEL } from '@/types/body';
+import { BODY_SHAPE_LABEL, RECON_STATUS_COLOR, RECON_STATUS_LABEL } from '@/types/body';
+import { CHANGE_POLICY_LABEL, COMMISSION_STATUS_COLOR, COMMISSION_STATUS_LABEL } from '@/types/commission';
 import { suggestIntervalHours } from '@/utils/humidity';
 
 const FILTER_KEYS = ['paintType', 'state'] as const;
@@ -72,8 +75,11 @@ export default function CoatBoard() {
   const batchUpdate = useCoatStore((state) => state.batchUpdate);
   const advanceState = useCoatStore((state) => state.advanceState);
   const reorderCoats = useCoatStore((state) => state.reorderCoats);
+  const restoreReturned = useCoatStore((state) => state.restoreReturned);
   const nextSeq = useCoatStore((state) => state.nextSeq);
   const suggestForBody = useCoatStore((state) => state.suggestForBody);
+  const specBasisOfBody = useCoatStore((state) => state.specBasisOfBody);
+  const commissionById = useCommissionStore((state) => state.commissionById);
 
   const { progressOf, currentCoatText, totals } = useCoatProgress();
   const url = useFilterQuery(FILTER_KEYS);
@@ -86,12 +92,19 @@ export default function CoatBoard() {
   const [dragId, setDragId] = useState<string | null>(null);
   const [overId, setOverId] = useState<string | null>(null);
 
-  const activeBody = bodies.find((body) => body.id === currentBodyId) ?? bodies[0] ?? null;
+  const activeBody = bodies.find((body) => body.id === currentBodyId) ?? bodies.find((body) => !body.returned) ?? bodies[0] ?? null;
   const bodyId = activeBody?.id ?? '';
 
   useEffect(() => {
-    if (!currentBodyId && bodies.length > 0) setCurrentBodyId(bodies[0]!.id);
+    if (!currentBodyId && bodies.length > 0) setCurrentBodyId(bodies.find((body) => !body.returned)?.id ?? bodies[0]!.id);
   }, [bodies, currentBodyId, setCurrentBodyId]);
+
+  const activeCommission = activeBody?.commissionId ? commissionById(activeBody.commissionId) ?? null : null;
+  const specBasis = bodyId ? specBasisOfBody(bodyId) : null;
+  const revisionStale =
+    activeBody?.specRevision !== null &&
+    activeCommission !== null &&
+    (activeBody.specRevision ?? 0) < Math.max(...activeCommission.revisions.map((r) => r.revisionNo));
 
   const bodyCoats = useMemo(
     () => coats.filter((coat) => coat.bodyId === bodyId).sort((a, b) => a.seq - b.seq),
@@ -125,6 +138,8 @@ export default function CoatBoard() {
     form.setFieldsValue({
       ...createEmptyCoatDraft(bodyId, nextSeq(bodyId)),
       paintType: suggestion?.paintType ?? 'raw',
+      // 湿膜建议按委托最新版算；委托人改版后这里自动换成新版值（旧建议作废）
+      thicknessUm: suggestion?.thicknessUm ?? 40,
     });
     setOpen(true);
   };
@@ -140,6 +155,7 @@ export default function CoatBoard() {
       thicknessUm: coat.thicknessUm,
       state: coat.state,
       needRecheck: coat.needRecheck,
+      basisRevision: coat.basisRevision,
     });
     setOpen(true);
   };
@@ -219,39 +235,103 @@ export default function CoatBoard() {
       ),
     },
     { title: '漆种', dataIndex: 'paintType', width: 100, render: (value: PaintType) => <Tag>{PAINT_TYPE_LABEL[value]}</Tag> },
-    { title: '色名', dataIndex: 'colorName', width: 120 },
-    { title: '涂刷日期', dataIndex: 'coatDate', width: 130, sorter: (a, b) => a.coatDate.localeCompare(b.coatDate) },
+    { title: '色名', dataIndex: 'colorName', width: 110 },
+    { title: '涂刷日期', dataIndex: 'coatDate', width: 120, sorter: (a, b) => a.coatDate.localeCompare(b.coatDate) },
     {
       title: '湿膜厚度',
       dataIndex: 'thicknessUm',
+      width: 110,
+      render: (value: number, record) => {
+        // 依据版本落后于委托最新版时，旧道次厚度按旧版保留，标「旧版建议」
+        const stale = record.basisRevision !== null && activeCommission !== null
+          && record.basisRevision < Math.max(...activeCommission.revisions.map((r) => r.revisionNo));
+        return (
+          <Space size={2} wrap>
+            <span>{value} μm</span>
+            {stale ? (
+              <Tooltip title="该道按旧版委托的湿膜建议施工并保留；新建议按新版重算">
+                <Tag color="orange" style={{ marginInlineEnd: 0 }}>旧版建议</Tag>
+              </Tooltip>
+            ) : null}
+          </Space>
+        );
+      },
+    },
+    {
+      title: '依据版本',
+      dataIndex: 'basisRevision',
       width: 120,
-      render: (value: number) => `${value} μm`,
+      render: (value: number | null) =>
+        value === null ? <Typography.Text type="secondary">无单</Typography.Text> : <Tag color="geekblue">第 {value} 版</Tag>,
+    },
+    {
+      title: '状态',
+      key: 'state',
+      width: 150,
+      render: (_value, record) =>
+        record.returned ? (
+          <Tooltip title="未开工 / 未涂道次：撤单或改版选择退回重排时标退，保留痕迹可重新启用">
+            <Tag color="default">退回</Tag>
+          </Tooltip>
+        ) : (
+          <StageTag state={record.state} needRecheck={record.needRecheck} />
+        ),
     },
     {
       title: '操作',
       key: 'action',
-      width: 220,
-      render: (_value, record) => (
-        <Space size={4} wrap>
-          <Button size="small" type="link" onClick={() => void handleAdvance(record)}>
-            推进状态
-          </Button>
-          <Button size="small" type="link" icon={<EditOutlined />} onClick={() => openEdit(record)}>
-            编辑
-          </Button>
-          <Popconfirm
-            title="删除该道次"
-            description="删除后其余道次会自动重编号。"
-            okText="确认"
-            cancelText="取消"
-            onConfirm={() => void removeCoat(record.id).then(() => message.success('已删除该道次'))}
-          >
-            <Button size="small" type="link" danger icon={<DeleteOutlined />}>
-              删除
+      width: 250,
+      render: (_value, record) =>
+        record.returned ? (
+          <Space size={4} wrap>
+            <Popconfirm
+              title="重新启用该道次"
+              description="清除退回标记，按当前委托最新版本重新纳入排产。"
+              okText="确认"
+              cancelText="取消"
+              onConfirm={() =>
+                void restoreReturned(record.id, { state: 'todo', coatDate: '' }).then(() =>
+                  message.success('该道次已按最新委托版本重新纳入排产'),
+                )
+              }
+            >
+              <Button size="small" type="link" icon={<RedoOutlined />}>
+                重新排产
+              </Button>
+            </Popconfirm>
+            <Popconfirm
+              title="彻底删除该道次"
+              description="退回道次的删除操作，删除后其余道次重编号。"
+              okText="确认"
+              cancelText="取消"
+              onConfirm={() => void removeCoat(record.id).then(() => message.success('已删除该道次'))}
+            >
+              <Button size="small" type="link" danger icon={<DeleteOutlined />}>
+                删除
+              </Button>
+            </Popconfirm>
+          </Space>
+        ) : (
+          <Space size={4} wrap>
+            <Button size="small" type="link" onClick={() => void handleAdvance(record)}>
+              推进状态
             </Button>
-          </Popconfirm>
-        </Space>
-      ),
+            <Button size="small" type="link" icon={<EditOutlined />} onClick={() => openEdit(record)}>
+              编辑
+            </Button>
+            <Popconfirm
+              title="删除该道次"
+              description="删除后其余道次会自动重编号。"
+              okText="确认"
+              cancelText="取消"
+              onConfirm={() => void removeCoat(record.id).then(() => message.success('已删除该道次'))}
+            >
+              <Button size="small" type="link" danger icon={<DeleteOutlined />}>
+                删除
+              </Button>
+            </Popconfirm>
+          </Space>
+        ),
     },
   ];
 
@@ -284,8 +364,63 @@ export default function CoatBoard() {
         <StatBadge label="完成率" value={`${stat?.coatPercent ?? 0}%`} percent={stat?.coatPercent ?? 0} tone="success" />
         <StatBadge label="当前道次" value={stat?.currentSeq ? `第 ${stat.currentSeq} 道` : '已完工'} tone="warning" />
         <StatBadge label="全局待复检" value={totals.recheck} suffix="道" tone="danger" />
-        <StatBadge label="荫干等待" value={stat?.dryingHours ?? 0} suffix="小时" tone="info" />
+        <StatBadge label="退回道次" value={bodyCoats.filter((coat) => coat.returned).length} suffix="道" tone="info" />
       </div>
+
+      {activeBody ? (
+        <Alert
+          style={{ marginBottom: 14 }}
+          type={activeBody.reconStatus === 'held' ? 'error' : activeBody.returned ? 'warning' : 'info'}
+          showIcon
+          message={
+            <Space wrap size={8}>
+              <Tag color="#8c2f1f">{activeBody.code}</Tag>
+              {activeCommission ? (
+                <>
+                  <Tag color={COMMISSION_STATUS_COLOR[activeCommission.status]}>
+                    {activeCommission.code} · {COMMISSION_STATUS_LABEL[activeCommission.status]}
+                  </Tag>
+                  <span>
+                    委托人 {activeCommission.clientName} · 交期 {activeCommission.dueDate || '未定'}
+                  </span>
+                  <Tag color="geekblue">
+                    当前认第 {activeBody.specRevision ?? 1} 版 / 委托第 {activeCommission.revisions.length} 版
+                  </Tag>
+                </>
+              ) : (
+                <Tag color={RECON_STATUS_COLOR[activeBody.reconStatus]}>{RECON_STATUS_LABEL[activeBody.reconStatus]}</Tag>
+              )}
+              {activeBody.returned ? <Tag color="default">该胎体已退回排产</Tag> : null}
+              {activeBody.reconStatus === 'held' ? <Typography.Text strong>对不上号，已挂起，等前台判单</Typography.Text> : null}
+            </Space>
+          }
+          description={
+            specBasis ? (
+              <Space wrap size={14}>
+                <span>
+                  认单规格：{BODY_SHAPE_LABEL[specBasis.shape]} · {specBasis.sizeMm}mm
+                  {specBasis.revisionNo !== null ? `（依据第 ${specBasis.revisionNo} 版）` : '（无单）'}
+                </span>
+                <Tag color="gold">建议湿膜 {specBasis.thicknessUm} μm</Tag>
+                <Tag color="blue">建议荫干 {suggestion?.dryingHours ?? '-'} 小时</Tag>
+                {revisionStale && activeBody.specPolicy ? (
+                  <Tag color={activeBody.specPolicy === 'finishOld' ? 'orange' : 'purple'}>
+                    已开工件：{CHANGE_POLICY_LABEL[activeBody.specPolicy]}
+                  </Tag>
+                ) : null}
+                {revisionStale ? (
+                  <Typography.Text type="secondary" style={{ fontSize: 12 }}>
+                    委托人改版后，湿膜厚度建议与荫干时长已按新版作废重算；
+                    {activeBody.specPolicy === 'finishOld'
+                      ? '旧道次照旧做完，道次表标「旧版建议」并写明依据版本。'
+                      : '本件退回重排：未涂道次标「退回」，可重新排产。'}
+                  </Typography.Text>
+                ) : null}
+              </Space>
+            ) : null
+          }
+        />
+      ) : null}
 
       {suggestion && suggestion.sourceCode ? (
         <Alert
@@ -386,11 +521,16 @@ export default function CoatBoard() {
             dataSource={filtered}
             onRow={(record) => ({
               onDragOver: (event) => {
+                if (record.returned) return;
                 event.preventDefault();
                 setOverId(record.id);
               },
               onDrop: () => void handleDrop(record.id),
-              className: overId === record.id && dragId !== record.id ? 'gb-row-drop-target' : undefined,
+              className: overId === record.id && dragId !== record.id
+                ? 'gb-row-drop-target'
+                : record.returned
+                  ? 'gb-row-returned'
+                  : undefined,
             })}
             rowSelection={{
               selectedRowKeys: selectedIds,
@@ -436,7 +576,8 @@ export default function CoatBoard() {
             </Form.Item>
           </Space>
           <Space size={12} style={{ display: 'flex' }}>
-            <Form.Item name="thicknessUm" label="湿膜厚度（μm）" rules={[{ required: true }]} style={{ flex: 1 }}>
+            <Form.Item name="thicknessUm" label="湿膜厚度（μm）" rules={[{ required: true }]} style={{ flex: 1 }}
+              extra={suggestion ? `按当前委托版本建议 ${suggestion.thicknessUm} μm（改版后自动重算）` : undefined}>
               <InputNumber min={5} max={500} style={{ width: '100%' }} />
             </Form.Item>
             <Form.Item name="state" label="状态" rules={[{ required: true }]} style={{ flex: 1 }}>
@@ -451,13 +592,40 @@ export default function CoatBoard() {
               ]}
             />
           </Form.Item>
+          <Form.Item name="basisRevision" label="依据委托版本">
+            <Select
+              disabled
+              options={
+                activeCommission
+                  ? activeCommission.revisions.map((revision) => ({
+                      value: revision.revisionNo,
+                      label: `第 ${revision.revisionNo} 版 · ${BODY_SHAPE_LABEL[revision.shape]} / ${revision.sizeMm}mm`,
+                    }))
+                  : ([{ value: -1, label: '无单胎体' }] as Array<{ value: number; label: string }>)
+              }
+            />
+          </Form.Item>
           <Alert
             type="warning"
             showIcon
             message={`环境适宜时，${PAINT_TYPE_LABEL[form.getFieldValue('paintType') as PaintType] ?? '该漆种'}建议间隔约 ${
               suggestion?.intervalHours ?? suggestIntervalHours('raw')
-            } 小时再进入下一道`}
+            } 小时再进入下一道；按当前认到的委托版本，湿膜建议 ${suggestion?.thicknessUm ?? 40} μm、预计荫干 ${
+              suggestion?.dryingHours ?? '-'
+            } 小时。`}
           />
+          {revisionStale && activeBody?.specPolicy ? (
+            <Alert
+              style={{ marginTop: 8 }}
+              type={activeBody.specPolicy === 'finishOld' ? 'info' : 'error'}
+              showIcon
+              message={
+                activeBody.specPolicy === 'finishOld'
+                  ? '本件选择「照旧做完」：已落道次保留旧版依据，后续新道次按新版建议施工。'
+                  : '本件选择「退回重排」：未涂道次已标「退回」，已涂道次留存；点「重新排产」按新版重铺。'
+              }
+            />
+          ) : null}
         </Form>
       </Modal>
     </div>

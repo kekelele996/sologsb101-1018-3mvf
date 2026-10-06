@@ -7,13 +7,23 @@ import { db, createId } from '@/utils/db';
 import type { Coat, CoatDraft, CoatState, PaintType } from '@/types/coat';
 import { nextCoatState } from '@/types/coat';
 import { suggestIntervalHours, suggestPaintType } from '@/utils/humidity';
+import { resolveSpecBasis, suggestSpecDryingHours, type SpecBasis } from '@/utils/commissionSpec';
 import { useBodyStore } from './bodyStore';
+import { useCommissionStore } from './commissionStore';
 
 export interface PaintSuggestion {
   paintType: PaintType;
   intervalHours: number;
   sourceCode: string;
   sourceColor: string;
+  /** 湿膜厚度建议（按当前认到的委托版本算；改版后随之重算） */
+  thicknessUm: number;
+  /** 建议荫干时长（小时，标准荫房 24℃/75%） */
+  dryingHours: number;
+  /** 建议依据的委托版本号；无单为 null */
+  basisRevision: number | null;
+  /** 委托最新版本号；大于 basisRevision 时提示已改版 */
+  latestRevision: number | null;
 }
 
 interface CoatStoreState {
@@ -30,9 +40,13 @@ interface CoatStoreState {
   advanceState: (id: string) => Promise<void>;
   markRecheck: (bodyId: string, recheck: boolean) => Promise<void>;
   reorderCoats: (bodyId: string, orderedIds: string[]) => Promise<void>;
+  /** 重排后重新启用一条被退回的道次：清退回标记并改挂到最新委托版本 */
+  restoreReturned: (id: string, patch?: Partial<Coat>) => Promise<void>;
   nextSeq: (bodyId: string) => number;
-  /** 同器型自动带出上次漆种与间隔建议 */
+  /** 同器型自动带出上次漆种与间隔建议；湿膜 / 荫干建议按认到的委托版本算 */
   suggestForBody: (bodyId: string) => PaintSuggestion;
+  /** 取胎体当前规格依据（道次页 / 荫房页展示改版重算结果） */
+  specBasisOfBody: (bodyId: string) => SpecBasis | null;
 }
 
 export const useCoatStore = create<CoatStoreState>((set, get) => ({
@@ -60,7 +74,21 @@ export const useCoatStore = create<CoatStoreState>((set, get) => ({
 
   async createCoat(draft) {
     const now = Date.now();
-    const row: Coat = { ...draft, id: createId('coat'), createdAt: now, updatedAt: now };
+    // 依据版本：新道次一律按委托最新版（改版即按新版施工）；
+    // 「照旧做完」只体现在已落道次上，不影响后续新道次。
+    let basisRevision = draft.basisRevision;
+    if (basisRevision === undefined || basisRevision === null) {
+      const body = useBodyStore.getState().bodies.find((item) => item.id === draft.bodyId);
+      if (body?.commissionId) {
+        const commission = useCommissionStore.getState().commissionById(body.commissionId);
+        basisRevision = commission
+          ? Math.max(...commission.revisions.map((revision) => revision.revisionNo))
+          : body.specRevision;
+      } else {
+        basisRevision = body?.specRevision ?? null;
+      }
+    }
+    const row: Coat = { ...draft, basisRevision, returned: draft.returned ?? false, id: createId('coat'), createdAt: now, updatedAt: now };
     await db.coats.put(row);
     await get().loadCoats();
     return row;
@@ -130,6 +158,33 @@ export const useCoatStore = create<CoatStoreState>((set, get) => ({
     return list.length === 0 ? 1 : Math.max(...list.map((coat) => coat.seq)) + 1;
   },
 
+  async restoreReturned(id, patch = {}) {
+    const target = get().coats.find((coat) => coat.id === id);
+    if (!target) return;
+    const body = useBodyStore.getState().bodies.find((item) => item.id === target.bodyId);
+    await db.coats.put({
+      ...target,
+      ...patch,
+      returned: false,
+      basisRevision: body?.specRevision ?? target.basisRevision,
+      updatedAt: Date.now(),
+    });
+    await get().loadCoats();
+  },
+
+  specBasisOfBody(bodyId) {
+    const body = useBodyStore.getState().bodies.find((item) => item.id === bodyId);
+    if (!body) return null;
+    const commission = body.commissionId
+      ? useCommissionStore.getState().commissionById(body.commissionId) ?? null
+      : null;
+    return resolveSpecBasis(commission, {
+      shape: body.shape,
+      sizeMm: body.sizeMm,
+      specRevision: body.specRevision,
+    });
+  },
+
   suggestForBody(bodyId) {
     const bodies = useBodyStore.getState().bodies;
     const current = bodies.find((body) => body.id === bodyId);
@@ -141,11 +196,25 @@ export const useCoatStore = create<CoatStoreState>((set, get) => ({
           .pop()
       : undefined;
     const paintType = suggestPaintType(get().nextSeq(bodyId), previousCoat?.paintType, current?.shape);
+    const commission = current?.commissionId
+      ? useCommissionStore.getState().commissionById(current.commissionId) ?? null
+      : null;
+    const latestNo = commission ? Math.max(...commission.revisions.map((revision) => revision.revisionNo)) : null;
+    // 湿膜 / 荫干建议只认委托最新版：改版即作废重算，与已开工件照旧 / 重排口径无关
+    const latestBasis = resolveSpecBasis(commission, {
+      shape: current?.shape ?? 'bowl',
+      sizeMm: current?.sizeMm ?? 120,
+      specRevision: latestNo,
+    });
     return {
       paintType,
       intervalHours: suggestIntervalHours(paintType),
       sourceCode: previousBody?.code ?? '',
       sourceColor: previousCoat?.colorName ?? '',
+      thicknessUm: latestBasis.thicknessUm,
+      dryingHours: suggestSpecDryingHours(latestBasis),
+      basisRevision: latestBasis.revisionNo,
+      latestRevision: latestNo,
     };
   },
 }));

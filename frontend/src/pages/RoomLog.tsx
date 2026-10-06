@@ -67,6 +67,9 @@ export default function RoomLog() {
 
   const bodyCode = (bodyId: string): string => bodies.find((body) => body.id === bodyId)?.code ?? bodyId;
 
+  /** 已退回（撤单 / 重排）的胎体不在在制录入页选择 */
+  const selectableBodies = useMemo(() => bodies.filter((body) => !body.returned), [bodies]);
+
   const filtered = useMemo(() => {
     const keyword = url.keyword.trim();
     const verdicts = url.values.verdict ?? [];
@@ -101,7 +104,7 @@ export default function RoomLog() {
   }, [rooms]);
 
   const openCreate = (): void => {
-    const bodyId = bodies[0]?.id ?? '';
+    const bodyId = selectableBodies[0]?.id ?? '';
     if (!bodyId) {
       message.warning('请先在胎体台账中登记胎体');
       return;
@@ -313,7 +316,7 @@ export default function RoomLog() {
         }}>
           <Form.Item name="bodyId" label="关联胎体" rules={[{ required: true, message: '请选择胎体' }]}>
             <Select
-              options={bodies.map((body) => ({
+              options={selectableBodies.map((body) => ({
                 value: body.id,
                 label: `${body.code} · ${BODY_SHAPE_LABEL[body.shape]}`,
               }))}

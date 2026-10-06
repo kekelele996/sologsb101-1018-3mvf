@@ -78,7 +78,13 @@ export const useBodyStore = create<BodyStoreState>((set, get) => ({
 
   async createBody(draft) {
     const now = Date.now();
-    const row: Body = { ...draft, id: createId('body'), createdAt: now, updatedAt: now };
+    // 认单 / 对账字段由 draft 提供（createEmptyBodyDraft 默认无单单列）
+    const row: Body = {
+      ...draft,
+      id: createId('body'),
+      createdAt: now,
+      updatedAt: now,
+    };
     await db.bodies.put(row);
     await get().loadBodies();
     get().setCurrentBodyId(row.id);

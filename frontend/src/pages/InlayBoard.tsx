@@ -72,7 +72,8 @@ export default function InlayBoard() {
   const [selectedIds, setSelectedIds] = useState<string[]>([]);
   const [batchType, setBatchType] = useState<InlayType>('nacre');
 
-  const activeBody = bodies.find((body) => body.id === currentBodyId) ?? bodies[0] ?? null;
+  const selectableBodies = useMemo(() => bodies.filter((body) => !body.returned), [bodies]);
+  const activeBody = bodies.find((body) => body.id === currentBodyId) ?? selectableBodies[0] ?? null;
   const bodyId = activeBody?.id ?? '';
 
   const filtered = useMemo(() => {
@@ -196,7 +197,7 @@ export default function InlayBoard() {
             style={{ minWidth: 220 }}
             placeholder="选择胎体"
             value={bodyId || undefined}
-            options={bodies.map((body) => ({
+            options={selectableBodies.map((body) => ({
               value: body.id,
               label: `${body.code} · ${BODY_SHAPE_LABEL[body.shape]}`,
             }))}
@@ -329,7 +330,7 @@ export default function InlayBoard() {
         <Form form={form} layout="vertical" preserve={false}>
           <Form.Item name="bodyId" label="所属胎体" rules={[{ required: true }]}>
             <Select
-              options={bodies.map((body) => ({
+              options={selectableBodies.map((body) => ({
                 value: body.id,
                 label: `${body.code} · ${BODY_SHAPE_LABEL[body.shape]}`,
               }))}
